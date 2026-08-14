@@ -7,7 +7,6 @@ from flask import Flask, request as flask_request
 import telebot
 
 # ==================== KONFIGURASI ====================
-BOT_TOKEN      = os.environ.get("BOT_TOKEN", "MASUKKAN_TOKEN_DI_RENDER")
 CHAT_ID        = os.environ.get("CHAT_ID", "971243017")
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "300"))
 COOLDOWN_MIN   = int(os.environ.get("COOLDOWN_MIN", "15"))
@@ -22,28 +21,39 @@ ASSETS = {
 
 # ==================== FLASK APP ====================
 app = Flask(__name__)
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = None
 cooldown_tracker = {}
 
+def get_bot():
+    global bot
+    if bot is None:
+        token = os.environ.get("BOT_TOKEN", "")
+        if not token or token == "MASUKKAN_TOKEN_DI_RENDER":
+            raise ValueError("BOT_TOKEN tidak ditemukan di Environment Variables!")
+        bot = telebot.TeleBot(token)
+        setup_handlers(bot)
+    return bot
+
 # ==================== TELEGRAM HANDLERS ====================
-@bot.message_handler(commands=["start"])
-def cmd_start(message):
-    bot.reply_to(message,
-        "\U0001f916 *Aswadd Signal Bot*\n\n"
-        "Bot aktif 24/7 di cloud!\n"
-        "TF: 5 Menit | Strategy: EMA Cross + RSI + Trend\n\n"
-        "/status - Cek status bot\n"
-        "/assets - List aset yang dipantau",
-        parse_mode="Markdown")
+def setup_handlers(b):
+    @b.message_handler(commands=["start"])
+    def cmd_start(message):
+        b.reply_to(message,
+            "\U0001f916 *Aswadd Signal Bot*\n\n"
+            "Bot aktif 24/7 di cloud!\n"
+            "TF: 5 Menit | Strategy: EMA Cross + RSI + Trend\n\n"
+            "/status - Cek status bot\n"
+            "/assets - List aset yang dipantau",
+            parse_mode="Markdown")
 
-@bot.message_handler(commands=["status"])
-def cmd_status(message):
-    bot.reply_to(message, "\u2705 Bot aktif dan scanning market tiap 5 menit...")
+    @b.message_handler(commands=["status"])
+    def cmd_status(message):
+        b.reply_to(message, "\u2705 Bot aktif dan scanning market tiap 5 menit...")
 
-@bot.message_handler(commands=["assets"])
-def cmd_assets(message):
-    assets_list = "\n".join([f"\u2022 {name} (`{sym}`)" for sym, name in ASSETS.items()])
-    bot.reply_to(message, f"\U0001f4ca *Aset Dipantau:*\n{assets_list}", parse_mode="Markdown")
+    @b.message_handler(commands=["assets"])
+    def cmd_assets(message):
+        assets_list = "\n".join([f"\u2022 {name} (`{sym}`)" for sym, name in ASSETS.items()])
+        b.reply_to(message, f"\U0001f4ca *Aset Dipantau:*\n{assets_list}", parse_mode="Markdown")
 
 # ==================== DATA FETCHING ====================
 def fetch_prices(symbol, days=2):
@@ -213,10 +223,11 @@ def format_signal(name, symbol, result):
 
 # ==================== BACKGROUND THREAD ====================
 def analysis_worker():
+    b = get_bot()
     print(f"[ANALYSIS] Started | Interval={CHECK_INTERVAL}s | Cooldown={COOLDOWN_MIN}m")
     try:
         assets_str = ", ".join(ASSETS.values())
-        bot.send_message(
+        b.send_message(
             CHAT_ID,
             f"\U0001f916 *Aswadd Bot Aktif 24/7!*\n\n"
             f"\U0001f4ca Memantau: {assets_str}\n"
@@ -241,7 +252,7 @@ def analysis_worker():
                 now = datetime.datetime.now().strftime("%H:%M:%S")
                 if sig in ("CALL", "PUT"):
                     msg = format_signal(name, symbol, result)
-                    bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
+                    b.send_message(CHAT_ID, msg, parse_mode="Markdown")
                     set_cooldown(symbol)
                     print(f"[{now}] \u2705 {sig} sent: {name} @ {result['price']}")
                 else:
@@ -260,25 +271,28 @@ def webhook():
     try:
         json_str = flask_request.get_data().decode("UTF-8")
         update = telebot.types.Update.de_json(json_str)
-        bot.process_new_updates([update])
+        get_bot().process_new_updates([update])
     except Exception as e:
         print(f"[WEBHOOK ERROR] {e}")
     return "OK", 200
 
 # ==================== STARTUP ====================
 if __name__ == "__main__":
-    render_url = os.environ.get("RENDER_EXTERNAL_URL", "")
-    if render_url:
-        webhook_url = f"{render_url}/webhook"
+    railway_url = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+    if railway_url:
+        webhook_url = f"https://{railway_url}/webhook"
         try:
-            bot.remove_webhook()
+            b = get_bot()
+            b.remove_webhook()
             time.sleep(1)
-            bot.set_webhook(url=webhook_url)
+            b.set_webhook(url=webhook_url)
             print(f"[WEBHOOK] Set to: {webhook_url}")
         except Exception as e:
             print(f"[WEBHOOK ERROR] {e}")
     else:
-        print("[WARN] RENDER_EXTERNAL_URL not set")
+        print("[WARN] RAILWAY_PUBLIC_DOMAIN not set, using polling fallback")
+        t_poll = threading.Thread(target=lambda: get_bot().infinity_polling(), daemon=True)
+        t_poll.start()
 
     t = threading.Thread(target=analysis_worker, daemon=True)
     t.start()
