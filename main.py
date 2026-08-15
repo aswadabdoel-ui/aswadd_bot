@@ -8,23 +8,26 @@ import telebot
 
 # ==================== KONFIGURASI FINAL ====================
 CHAT_ID        = os.environ.get("CHAT_ID", "971243017")
-CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "300"))
+CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "300"))  # 5 menit
 COOLDOWN_MIN   = int(os.environ.get("COOLDOWN_MIN", "10"))
-MIN_SCORE      = float(os.environ.get("MIN_SCORE", "3"))
+MIN_SCORE_BASE = float(os.environ.get("MIN_SCORE_BASE", "5.0"))  # Naik dari 3 → 5
 
-# HANYA EUR/USD — fokus 1 market
+# FIXED EXPIRY - SESUAI BATAS PLATFORM STOCKITY
+EXPIRY_MINUTES = 5
+TIMEFRAME_MINUTES = 5
+
+# MULTI-ASSET SUPPORT
 ASSETS = {
     "EURUSD=X": "EUR/USD",
+    "GBPUSD=X": "GBP/USD",
+    "USDJPY=X": "USD/JPY",
 }
 
 # Session hours in UTC
-# London: 07:00-16:00 UTC | New York: 12:00-21:00 UTC
-# Overlap (BEST): 13:00-16:00 UTC = 20:00-23:00 WIB
-# London active: 07:00-16:00 UTC = 14:00-23:00 WIB
-LONDON_OPEN_UTC  = 7
-LONDON_CLOSE_UTC = 16
-NY_OPEN_UTC      = 12
-NY_CLOSE_UTC     = 21
+LONDON_OPEN_UTC   = 7
+LONDON_CLOSE_UTC  = 16
+NY_OPEN_UTC       = 12
+NY_CLOSE_UTC      = 21
 OVERLAP_START_UTC = 13
 OVERLAP_END_UTC   = 16
 
@@ -48,29 +51,30 @@ def get_bot():
 def setup_handlers(b):
     @b.message_handler(commands=["start"])
     def cmd_start(message):
+        asset_list = "\n".join([f"  • {v}" for v in ASSETS.values()])
         b.reply_to(message,
-            "\U0001f916 *Aswadd Bot EUR/USD Final*\n\n"
-            "\U0001f4ca Update TIAP 5 MENIT\n"
-            "\U0001f6a8 Sinyal CALL/PUT saat skor tinggi\n\n"
-            "*Spesifikasi:*\n"
-            "\u2022 Market: EUR/USD saja\n"
-            "\u2022 TF: 5 Menit\n"
-            "\u2022 Expiry: 5-15 Menit\n"
-            "\u2022 Entry: LANGSUNG saat sinyal\n"
-            f"\u2022 Min Score: {MIN_SCORE}/8\n"
-            f"\u2022 Cooldown: {COOLDOWN_MIN} menit\n\n"
-            "*8 Layer + Anti-Noise:*\n"
-            "\u2022 EMA 9/21/55\n"
-            "\u2022 RSI(14) Zone 35-65\n"
-            "\u2022 MACD(8,17,9)\n"
-            "\u2022 Bollinger Bands(20,2)\n"
-            "\u2022 ADX(14)\n"
-            "\u2022 Volume Spike\n"
-            "\u2022 Candlestick Pattern\n"
-            "\u2022 ATR Filter + 2x Confirm\n\n"
-            "*Jam Terbaik:* 20:00-23:00 WIB\n"
-            "(London+NY Overlap)\n\n"
-            "/status /score",
+            f"\U0001f916 *Aswadd Bot Multi-Asset Final*\n\n"
+            f"\U0001f4ca Update TIAP {TIMEFRAME_MINUTES} MENIT\n"
+            f"\U0001f6a8 Sinyal CALL/PUT saat skor tinggi\n\n"
+            f"*Spesifikasi:*\n"
+            f"\u2022 Market:\n{asset_list}\n"
+            f"\u2022 TF: {TIMEFRAME_MINUTES} Menit\n"
+            f"\u2022 Expiry: {EXPIRY_MINUTES} Menit (MAX PLATFORM)\n"
+            f"\u2022 Entry: LANGSUNG saat sinyal muncul\n"
+            f"\u2022 Min Score: {MIN_SCORE_BASE}/8 (diperketat)\n"
+            f"\u2022 Cooldown: {COOLDOWN_MIN} menit/aset\n\n"
+            f"*8 Layer + Filter Ketat Expiry 5m:*\n"
+            f"\u2022 EMA 9/21/55\n"
+            f"\u2022 RSI(14) Zone 35-65\n"
+            f"\u2022 MACD(8,17,9)\n"
+            f"\u2022 Bollinger Bands(20,2)\n"
+            f"\u2022 ADX(14) ≥ 22\n"
+            f"\u2022 Volume Spike ≥ 1.3x\n"
+            f"\u2022 Candlestick Pattern WAJIB\n"
+            f"\u2022 ATR Filter + 2x Confirm\n\n"
+            f"*Jam Terbaik:* 20:00-23:00 WIB\n"
+            f"(London+NY Overlap)\n\n"
+            f"/status /score",
             parse_mode="Markdown")
 
     @b.message_handler(commands=["status"])
@@ -78,13 +82,16 @@ def setup_handlers(b):
         utc_now = datetime.datetime.utcnow()
         hour = utc_now.hour
         session = get_session_name(hour)
+        active_assets = [v for k, v in ASSETS.items()]
         b.reply_to(message,
-            f"\u2705 *EUR/USD Bot Aktif!*\n"
-            f"Min skor: {MIN_SCORE}/8\n"
-            f"Cooldown: {COOLDOWN_MIN} menit\n"
+            f"\u2705 *Bot Aktif!*\n"
+            f"Aset: {', '.join(active_assets)}\n"
+            f"Min skor: {MIN_SCORE_BASE}/8\n"
+            f"Expiry: {EXPIRY_MINUTES}m (fixed)\n"
+            f"Cooldown: {COOLDOWN_MIN} menit/aset\n"
             f"Pending confirm: {len(pending_signals)}\n"
             f"Sesi sekarang: {session}\n"
-            "Update tiap 5 menit",
+            f"Update tiap {TIMEFRAME_MINUTES} menit",
             parse_mode="Markdown")
 
     @b.message_handler(commands=["score"])
@@ -119,9 +126,6 @@ def is_active_session(hour_utc):
     return (LONDON_OPEN_UTC <= hour_utc < LONDON_CLOSE_UTC) or \
            (NY_OPEN_UTC <= hour_utc < NY_CLOSE_UTC)
 
-def is_best_session(hour_utc):
-    return OVERLAP_START_UTC <= hour_utc < OVERLAP_END_UTC
-
 # ==================== DATA FETCHING ====================
 def fetch_prices(symbol, days=3):
     try:
@@ -138,7 +142,7 @@ def fetch_prices(symbol, days=3):
         opens   = [o for o in quotes["open"]  if o is not None]
         volumes = [v for v in quotes.get("volume", []) if v is not None]
         min_len = min(len(closes), len(highs), len(lows), len(opens), len(volumes))
-        if min_len < 60:
+        if min_len < 80:
             return None, None, None, None, None
         return (closes[-min_len:], highs[-min_len:], lows[-min_len:],
                 opens[-min_len:], volumes[-min_len:])
@@ -209,7 +213,6 @@ def calc_atr_series(highs, lows, closes, period=14):
     return atr_values
 
 def calc_macd(closes, fast=8, slow=17, signal=9):
-    """MACD 8-17-9: optimized for 5-minute charts"""
     if len(closes) < slow + signal:
         return 0, 0, 0
     ema_fast = calc_ema_series(closes, fast)
@@ -283,9 +286,8 @@ def detect_candle_pattern(opens, highs, lows, closes):
         return "shooting_star"
     return "none"
 
-# ==================== ANTI-NOISE 1: ATR VOLATILITY FILTER ====================
+# ==================== ANTI-NOISE: ATR VOLATILITY FILTER ====================
 def check_atr_filter(highs, lows, closes):
-    """EUR/USD 5m ATR avg ~3-8 pips (0.0003-0.0008)"""
     atr_series = calc_atr_series(highs, lows, closes, 14)
     if len(atr_series) < 20:
         return True, "ATR data kurang"
@@ -300,7 +302,7 @@ def check_atr_filter(highs, lows, closes):
         return False, f"Market chaos ({atr_ratio:.2f}x avg)"
     return True, f"ATR {atr_ratio:.2f}x normal"
 
-# ==================== ANALISIS 8-LAYER WEIGHTED ====================
+# ==================== ANALISIS 8-LAYER + FILTER KETAT EXPIRY 5M ====================
 def analyze(symbol):
     closes, highs, lows, opens, volumes = fetch_prices(symbol)
     if not closes or len(closes) < 80:
@@ -319,7 +321,6 @@ def analyze(symbol):
     ema21_s = calc_ema_series(closes, 21)
     ema55   = calc_ema(closes, 55)
 
-    # Basic info for market update
     basic = {
         "price": price, "rsi": rsi, "atr": atr, "adx": adx_val,
         "ema9": ema9_s[-1] if ema9_s else 0,
@@ -341,7 +342,6 @@ def analyze(symbol):
     golden_cross = prev_diff <= 0 and curr_diff > 0
     death_cross  = prev_diff >= 0 and curr_diff < 0
 
-    # Trend direction for display
     if curr_diff > 0:
         basic["trend"] = "UP"
     elif curr_diff < 0:
@@ -355,7 +355,7 @@ def analyze(symbol):
         basic["reasons"] = [f"Trend {basic['trend']} | Tidak ada cross"]
         return basic
 
-    # ANTI-NOISE 1: ATR Filter
+    # ANTI-NOISE: ATR Filter
     atr_ok, atr_reason = check_atr_filter(highs, lows, closes)
     if not atr_ok:
         basic["signal"] = "WAIT"
@@ -368,9 +368,9 @@ def analyze(symbol):
     score = 0.0
     reasons = []
 
-    # Layer 1: EMA 9/21 Crossover — 1.5pt (TERPENTING)
+    # Layer 1: EMA 9/21 Crossover — 1.5pt
     score += 1.5
-    reasons.append(f"EMA9/21 {'\u2b06' if golden_cross else '\u2b07'} (+1.5)")
+    reasons.append(f"EMA9/21 {'⬆' if golden_cross else '⬇'} (+1.5)")
 
     # Layer 2: EMA 55 Trend — 1.0pt
     if golden_cross and price > ema55:
@@ -422,18 +422,49 @@ def analyze(symbol):
         score += 0.5
         reasons.append(f"{candle_pat.replace('_',' ').title()} (+0.5)")
 
-    # Normalize to /8 scale (max raw = 7.0)
+    # Normalize to /8 scale
     score_norm = round(score / 7.0 * 8.0, 1)
     basic["score"] = score_norm
     basic["reasons"] = reasons
     basic["direction"] = direction
 
-    if score_norm < MIN_SCORE:
+    # ============================================================
+    # FILTER KETAT KHUSUS EXPIRY 5 MENIT (1 CANDLE)
+    # ============================================================
+    if EXPIRY_MINUTES <= TIMEFRAME_MINUTES:
+        # Gate 1: ADX harus ≥ 22
+        if adx_val < 22:
+            basic["signal"] = "WAIT"
+            basic["filtered"] = True
+            basic["reasons"] = [f"ADX {adx_val} < 22 (terlalu lemah untuk 1 candle)"]
+            return basic
+
+        # Gate 2: Volume harus ≥ 1.3x
+        if vol_ratio < 1.3:
+            basic["signal"] = "WAIT"
+            basic["filtered"] = True
+            basic["reasons"] = [f"Volume {vol_ratio}x < 1.3x (momentum kurang untuk 1 candle)"]
+            return basic
+
+        # Gate 3: Candle pattern WAJIB ada
+        valid_patterns = ("bullish_engulfing", "bearish_engulfing", "hammer", "shooting_star")
+        if candle_pat not in valid_patterns:
+            basic["signal"] = "WAIT"
+            basic["filtered"] = True
+            basic["reasons"] = [f"Tidak ada candle pattern konfirmasi (wajib untuk expiry 5m)"]
+            return basic
+
+        # Gate 4: Minimum score lebih tinggi
+        effective_min_score = max(MIN_SCORE_BASE, 5.0)
+    else:
+        effective_min_score = MIN_SCORE_BASE
+
+    if score_norm < effective_min_score:
         basic["signal"] = "WAIT"
+        basic["reasons"] = [f"Skor {score_norm} < {effective_min_score} (filter ketat expiry 5m)"]
         return basic
 
     # SL/TP based on ATR
-    # EUR/USD 5m ATR ~0.0003-0.0008 (3-8 pips)
     if direction == "CALL":
         basic["sl"] = round(price - 1.5 * atr, 5)
         basic["tp"] = round(price + 2.5 * atr, 5)
@@ -444,7 +475,7 @@ def analyze(symbol):
     basic["signal"] = direction
     return basic
 
-# ==================== COOLDOWN ====================
+# ==================== COOLDOWN PER ASET ====================
 def is_on_cooldown(symbol):
     last = cooldown_tracker.get(symbol, 0)
     return (time.time() - last) < (COOLDOWN_MIN * 60)
@@ -452,14 +483,15 @@ def is_on_cooldown(symbol):
 def set_cooldown(symbol):
     cooldown_tracker[symbol] = time.time()
 
-# ==================== FORMAT: MARKET UPDATE (tiap 5 menit) ====================
-def format_market_update(result):
+# ==================== FORMAT: MARKET UPDATE ====================
+def format_market_update(symbol, result):
+    name = ASSETS.get(symbol, symbol)
     now_wib = (datetime.datetime.utcnow() + datetime.timedelta(hours=7)).strftime("%H:%M")
     hour_utc = datetime.datetime.utcnow().hour
     session = get_session_name(hour_utc)
 
     if not result:
-        return f"\U0001f4ca *EUR/USD UPDATE* | {now_wib} WIB\n_Data error_"
+        return f"\U0001f4ca *{name} UPDATE* | {now_wib} WIB\n_Data error_"
 
     price = result.get("price", 0)
     rsi = result.get("rsi", 0)
@@ -470,43 +502,16 @@ def format_market_update(result):
     vol = result.get("vol_ratio", 0)
     candle = result.get("candle_pattern", "none")
 
-    # RSI emoji
-    if rsi > 65:
-        rsi_e = "\U0001f534"
-    elif rsi < 35:
-        rsi_e = "\U0001f7e2"
-    else:
-        rsi_e = "\u26aa"
-
-    # Signal emoji
-    if sig == "CALL":
-        sig_e = "\U0001f7e2"
-    elif sig == "PUT":
-        sig_e = "\U0001f534"
-    else:
-        sig_e = "\u23f3"
-
-    # Trend arrow
-    if trend == "UP":
-        t_arrow = "\u2b06\ufe0f"
-    elif trend == "DOWN":
-        t_arrow = "\u2b07\ufe0f"
-    else:
-        t_arrow = "\u27a1\ufe0f"
-
-    # Price format (EUR/USD = 5 decimal)
+    rsi_e = "\U0001f534" if rsi > 65 else ("\U0001f7e2" if rsi < 35 else "\u26aa")
+    sig_e = "\U0001f7e2" if sig == "CALL" else ("\U0001f534" if sig == "PUT" else "\u23f3")
+    t_arrow = "\u2b06\ufe0f" if trend == "UP" else ("\u2b07\ufe0f" if trend == "DOWN" else "\u27a1\ufe0f")
     price_str = f"{price:.5f}"
 
-    # Pip movement from EMA21
     ema21 = result.get("ema21", 0)
-    if ema21 > 0:
-        pip_diff = (price - ema21) * 10000
-        pip_str = f"{pip_diff:+.1f} pip dari EMA21"
-    else:
-        pip_str = ""
+    pip_str = f"{(price - ema21) * 10000:+.1f} pip dari EMA21" if ema21 > 0 else ""
 
     lines = [
-        f"\U0001f4ca *EUR/USD LIVE UPDATE*",
+        f"\U0001f4ca *{name} LIVE UPDATE*",
         f"\u23f0 {now_wib} WIB | {session}",
         "\u2501" * 18,
         f"{sig_e} *Harga:* `{price_str}` {t_arrow}",
@@ -526,19 +531,14 @@ def format_market_update(result):
         reason = result.get("reasons", [""])[0] if result.get("reasons") else "Menunggu..."
         lines.append(f"\u23f3 {reason}")
 
-    lines += [
-        "",
-        f"\U0001f550 Jam terbaik: 20:00-23:00 WIB",
-        "_@Aswadd_bot EUR/USD Final_"
-    ]
+    lines += ["", f"\U0001f550 Jam terbaik: 20:00-23:00 WIB", "_@Aswadd_bot Multi-Asset Final_"]
     return "\n".join(lines)
 
-# ==================== FORMAT: SIGNAL ALERT (langsung entry) ====================
+# ==================== FORMAT: SIGNAL ALERT (TEGAS) ====================
 def format_signal_alert(name, symbol, result):
     sig   = result["signal"]
     emoji = "\U0001f7e2" if sig == "CALL" else "\U0001f534"
     score = result["score"]
-    now_wib = (datetime.datetime.utcnow() + datetime.timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S")
     p     = result["price"]
     hour_utc = datetime.datetime.utcnow().hour
     session = get_session_name(hour_utc)
@@ -554,188 +554,4 @@ def format_signal_alert(name, symbol, result):
             score_bar += "\u26ab"
 
     if score >= 7:
-        strength = "\U0001f525 *SANGAT KUAT*"
-    elif score >= 5.5:
-        strength = "\U0001f4aa *KUAT*"
-    elif score >= 4:
-        strength = "\u2705 *STANDAR*"
-    else:
-        strength = "\u26a0\ufe0f *MINIMAL — hati-hati*"
-
-    # Entry instruction
-    if sig == "CALL":
-        entry_instruction = "\U0001f7e2 *LANGSUNG BELI NAIK (CALL)*"
-    else:
-        entry_instruction = "\U0001f534 *LANGSUNG BELI TURUN (PUT)*"
-
-    lines = [
-        f"\U0001f6a8 {emoji} *{sig} SIGNAL \u2014 {name}*",
-        f"\U0001f4ca `{symbol}` | TF: 5 Menit",
-        "\u2501" * 19,
-        entry_instruction,
-        f"\U0001f3af *Expiry: 5-15 Menit*",
-        f"\u26a1 *Entry: SEKARANG \u2014 jangan tunggu!*",
-        "\u2501" * 19,
-        f"*Skor: {score}/8* {score_bar}",
-        f"{strength}",
-        f"\U0001f550 {session}",
-        "\u2501" * 19,
-        f"\U0001f4b0 Entry: `{p:.5f}`",
-        f"\U0001f3af TP: `{result.get('tp', 'N/A')}`",
-        f"\U0001f6d1 SL: `{result.get('sl', 'N/A')}`",
-        f"\U0001f4c8 RR: 1:1.67",
-        "\u2501" * 19,
-        f"\U0001f4c9 RSI: `{result['rsi']}` | ADX: `{result['adx']}`",
-        f"\U0001f4c8 EMA9: `{result['ema9']:.5f}`",
-        f"\U0001f4c9 EMA21: `{result['ema21']:.5f}`",
-        f"\U0001f4ca EMA55: `{result['ema55']:.5f}`",
-        f"\U0001f4cf MACD(8,17,9): `{result['macd_hist']}`",
-        f"\U0001f4e6 Vol: `{result['vol_ratio']}x`",
-        f"\U0001f56f Pattern: `{result['candle_pattern'].replace('_',' ').title()}`",
-        "\u2501" * 19,
-        "*\u2705 Konfirmasi:*",
-    ]
-    for r in result.get("reasons", []):
-        lines.append(f"\u2022 {r}")
-    lines += [
-        "\u2501" * 19,
-        "*\U0001f4cc Cara Entry:*",
-        "1. Buka Stockity",
-        f"2. Pilih EUR/USD",
-        f"3. Pilih {sig} ({'\u2b06 Naik' if sig == 'CALL' else '\u2b07 Turun'})",
-        "4. Expiry: 5-15 menit",
-        "5. Klik BUY \u2014 SEKARANG!",
-        "\u2501" * 19,
-        f"\u23f0 {now_wib} WIB",
-        "_@Aswadd_bot EUR/USD Final_"
-    ]
-    return "\n".join(lines)
-
-# ==================== BACKGROUND THREAD ====================
-def analysis_worker():
-    b = get_bot()
-    print(f"[EUR/USD FINAL] Started | Interval={CHECK_INTERVAL}s | MinScore={MIN_SCORE}")
-    try:
-        b.send_message(
-            CHAT_ID,
-            f"\U0001f916 *Aswadd Bot EUR/USD FINAL Aktif!*\n\n"
-            f"\U0001f4ca Update TIAP 5 MENIT\n"
-            f"\U0001f6a8 Sinyal CALL/PUT langsung entry\n\n"
-            f"*Spesifikasi:*\n"
-            f"\u2022 Market: EUR/USD\n"
-            f"\u2022 TF: 5 Menit\n"
-            f"\u2022 Expiry: 5-15 Menit\n"
-            f"\u2022 Min Score: {MIN_SCORE}/8\n"
-            f"\u2022 Cooldown: {COOLDOWN_MIN} menit\n\n"
-            f"*8 Layer + Anti-Noise:*\n"
-            f"1\u20e3 EMA 9/21 Cross (1.5pt)\n"
-            f"2\u20e3 EMA 55 Trend (1.0pt)\n"
-            f"3\u20e3 RSI(14) 35-65 (1.0pt)\n"
-            f"4\u20e3 MACD(8,17,9) (1.0pt)\n"
-            f"5\u20e3 Bollinger Bands (0.5pt)\n"
-            f"6\u20e3 ADX(14) (1.0pt)\n"
-            f"7\u20e3 Volume Spike (0.5pt)\n"
-            f"8\u20e3 Candlestick (0.5pt)\n"
-            f"+ ATR Filter + 2x Confirm\n\n"
-            f"*\U0001f550 Jam Terbaik:* 20:00-23:00 WIB\n"
-            f"(London+NY Overlap)\n\n"
-            f"_Estimasi: 4-8 sinyal/hari_",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        print(f"[STARTUP MSG ERROR] {e}")
-
-    while True:
-        result = None
-        signal_to_send = None
-
-        for symbol, name in ASSETS.items():
-            try:
-                result = analyze(symbol)
-                if result is None:
-                    continue
-                last_signal_scores[symbol] = result.get("score", 0)
-
-                sig = result.get("signal", "WAIT")
-                if sig in ("CALL", "PUT") and not is_on_cooldown(symbol):
-                    # ANTI-NOISE 2: Consecutive Confirmation
-                    pending_key = f"{symbol}_{sig}"
-                    if pending_key in pending_signals:
-                        signal_to_send = (symbol, name, result)
-                        del pending_signals[pending_key]
-                    else:
-                        pending_signals[pending_key] = {
-                            "time": time.time(),
-                            "score": result["score"],
-                        }
-            except Exception as e:
-                print(f"[ERROR] {symbol}: {e}")
-
-        # 1. ALWAYS send market update every 5 minutes
-        try:
-            update_msg = format_market_update(result)
-            b.send_message(CHAT_ID, update_msg, parse_mode="Markdown")
-            now = datetime.datetime.now().strftime("%H:%M:%S")
-            print(f"[{now}] \U0001f4ca Market update sent")
-        except Exception as e:
-            print(f"[UPDATE ERROR] {e}")
-
-        # 2. Send confirmed signal (langsung entry)
-        if signal_to_send:
-            symbol, name, sig_result = signal_to_send
-            try:
-                alert_msg = format_signal_alert(name, symbol, sig_result)
-                b.send_message(CHAT_ID, alert_msg, parse_mode="Markdown")
-                set_cooldown(symbol)
-                now = datetime.datetime.now().strftime("%H:%M:%S")
-                print(f"[{now}] \U0001f6a8 {sig_result['signal']} CONFIRMED: {name} | Score: {sig_result['score']}/8")
-            except Exception as e:
-                print(f"[SIGNAL ERROR] {e}")
-
-        # Clean old pending (older than 15 minutes)
-        cutoff = time.time() - 900
-        for key in list(pending_signals.keys()):
-            if pending_signals[key]["time"] < cutoff:
-                del pending_signals[key]
-
-        time.sleep(CHECK_INTERVAL)
-
-# ==================== FLASK ROUTES ====================
-@app.route("/")
-def health():
-    return {"status": "alive", "bot": "@Aswadd_bot EUR/USD Final", "market": "EUR/USD"}, 200
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    try:
-        json_str = flask_request.get_data().decode("UTF-8")
-        update = telebot.types.Update.de_json(json_str)
-        get_bot().process_new_updates([update])
-    except Exception as e:
-        print(f"[WEBHOOK ERROR] {e}")
-    return "OK", 200
-
-# ==================== STARTUP ====================
-if __name__ == "__main__":
-    railway_url = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
-    if railway_url:
-        webhook_url = f"https://{railway_url}/webhook"
-        try:
-            b = get_bot()
-            b.remove_webhook()
-            time.sleep(1)
-            b.set_webhook(url=webhook_url)
-            print(f"[WEBHOOK] Set to: {webhook_url}")
-        except Exception as e:
-            print(f"[WEBHOOK ERROR] {e}")
-    else:
-        print("[WARN] RAILWAY_PUBLIC_DOMAIN not set, using polling fallback")
-        t_poll = threading.Thread(target=lambda: get_bot().infinity_polling(), daemon=True)
-        t_poll.start()
-
-    t = threading.Thread(target=analysis_worker, daemon=True)
-    t.start()
-
-    port = int(os.environ.get("PORT", 8080))
-    print(f"[FLASK] Starting on port {port}")
-    app.run(host="0.0.0.0", port=port, threaded=True)
+        strength = "\U0001f5
