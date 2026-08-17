@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import datetime
 import threading
@@ -8,28 +9,37 @@ import telebot
 
 # ==================== KONFIGURASI FINAL ====================
 CHAT_ID        = os.environ.get("CHAT_ID", "971243017")
-CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "300"))  # 5 menit
+CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "300"))
 COOLDOWN_MIN   = int(os.environ.get("COOLDOWN_MIN", "10"))
-MIN_SCORE_BASE = float(os.environ.get("MIN_SCORE_BASE", "5.0"))  # Naik dari 3 → 5
+MIN_SCORE_BASE = float(os.environ.get("MIN_SCORE_BASE", "5.0"))
 
-# FIXED EXPIRY - SESUAI BATAS PLATFORM STOCKITY
 EXPIRY_MINUTES = 5
 TIMEFRAME_MINUTES = 5
 
-# MULTI-ASSET SUPPORT
+TIMEZONE_OFFSET_HOURS = 8
+TIMEZONE_LABEL = "WITA"
+
+EARLY_WARNING_SECONDS = 60
+
 ASSETS = {
     "EURUSD=X": "EUR/USD",
     "GBPUSD=X": "GBP/USD",
     "USDJPY=X": "USD/JPY",
 }
 
-# Session hours in UTC
 LONDON_OPEN_UTC   = 7
 LONDON_CLOSE_UTC  = 16
 NY_OPEN_UTC       = 12
 NY_CLOSE_UTC      = 21
 OVERLAP_START_UTC = 13
 OVERLAP_END_UTC   = 16
+
+HIGH_IMPACT_NEWS_HOURS_UTC = [12, 13, 14]
+
+# ==================== HELPER ====================
+def escape_markdown(text):
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', str(text))
 
 # ==================== FLASK APP ====================
 app = Flask(__name__)
@@ -53,29 +63,33 @@ def setup_handlers(b):
     def cmd_start(message):
         asset_list = "\n".join([f"  • {v}" for v in ASSETS.values()])
         b.reply_to(message,
-            f"\U0001f916 *Aswadd Bot Multi-Asset Final*\n\n"
-            f"\U0001f4ca Update TIAP {TIMEFRAME_MINUTES} MENIT\n"
-            f"\U0001f6a8 Sinyal CALL/PUT saat skor tinggi\n\n"
+            f"🤖 *Aswadd Bot Multi\\-Asset Final v2*\n\n"
+            f"📊 Update TIAP {TIMEFRAME_MINUTES} MENIT\n"
+            f"⏰ Early Warning: 1 menit sebelum entry\n"
+            f"🔄 Re\\-validasi otomatis sebelum ENTRY\n"
+            f"🚨 Sinyal CALL/PUT saat skor tinggi\n\n"
             f"*Spesifikasi:*\n"
-            f"\u2022 Market:\n{asset_list}\n"
-            f"\u2022 TF: {TIMEFRAME_MINUTES} Menit\n"
-            f"\u2022 Expiry: {EXPIRY_MINUTES} Menit (MAX PLATFORM)\n"
-            f"\u2022 Entry: LANGSUNG saat sinyal muncul\n"
-            f"\u2022 Min Score: {MIN_SCORE_BASE}/8 (diperketat)\n"
-            f"\u2022 Cooldown: {COOLDOWN_MIN} menit/aset\n\n"
-            f"*8 Layer + Filter Ketat Expiry 5m:*\n"
-            f"\u2022 EMA 9/21/55\n"
-            f"\u2022 RSI(14) Zone 35-65\n"
-            f"\u2022 MACD(8,17,9)\n"
-            f"\u2022 Bollinger Bands(20,2)\n"
-            f"\u2022 ADX(14) ≥ 22\n"
-            f"\u2022 Volume Spike ≥ 1.3x\n"
-            f"\u2022 Candlestick Pattern WAJIB\n"
-            f"\u2022 ATR Filter + 2x Confirm\n\n"
-            f"*Jam Terbaik:* 20:00-23:00 WIB\n"
-            f"(London+NY Overlap)\n\n"
-            f"/status /score",
-            parse_mode="Markdown")
+            f"• Market:\n{asset_list}\n"
+            f"• TF: {TIMEFRAME_MINUTES} Menit\n"
+            f"• Expiry: {EXPIRY_MINUTES} Menit \\(MAX PLATFORM\\)\n"
+            f"• Entry: 1 menit setelah warning \\+ re\\-check\n"
+            f"• Min Score: {MIN_SCORE_BASE}/8 \\(diperketat\\)\n"
+            f"• Cooldown: {COOLDOWN_MIN} menit/aset\n\n"
+            f"*Filter Ketat Expiry 5m:*\n"
+            f"• EMA 9/21/55 \\+ Cross\n"
+            f"• RSI\\(14\\) Zone 35\\-65\n"
+            f"• MACD\\(8,17,9\\)\n"
+            f"• Bollinger Bands\\(20,2\\)\n"
+            f"• ADX\\(14\\) ≥ 22\n"
+            f"• Volume Spike ≥ 1\\.3x\n"
+            f"• Candlestick Pattern WAJIB\n"
+            f"• Wick Filter \\(max 70\\% body\\)\n"
+            f"• ATR Filter \\+ News Hours Block\n\n"
+            f"*Jam Terbaik:* 21:00\\-00:00 {TIMEZONE_LABEL}\n"
+            f"\\(London\\+NY Overlap\\)\n\n"
+            f"⚠️ _Data: Yahoo Finance \\(delay ~15\\-30 detik\\)_\n\n"
+            f"/status /score /backtest",
+            parse_mode="MarkdownV2")
 
     @b.message_handler(commands=["status"])
     def cmd_status(message):
@@ -84,27 +98,45 @@ def setup_handlers(b):
         session = get_session_name(hour)
         active_assets = [v for k, v in ASSETS.items()]
         b.reply_to(message,
-            f"\u2705 *Bot Aktif!*\n"
-            f"Aset: {', '.join(active_assets)}\n"
+            f"✅ *Bot Aktif\\!*\n"
+            f"Aset: {escape_markdown(', '.join(active_assets))}\n"
             f"Min skor: {MIN_SCORE_BASE}/8\n"
-            f"Expiry: {EXPIRY_MINUTES}m (fixed)\n"
+            f"Expiry: {EXPIRY_MINUTES}m \\(fixed\\)\n"
+            f"Early warning: {EARLY_WARNING_SECONDS // 60} menit\n"
             f"Cooldown: {COOLDOWN_MIN} menit/aset\n"
             f"Pending confirm: {len(pending_signals)}\n"
-            f"Sesi sekarang: {session}\n"
+            f"Sesi sekarang: {escape_markdown(session)}\n"
             f"Update tiap {TIMEFRAME_MINUTES} menit",
-            parse_mode="Markdown")
+            parse_mode="MarkdownV2")
 
     @b.message_handler(commands=["score"])
     def cmd_score(message):
-        lines = ["\U0001f4ca *Skor Terakhir:*"]
+        lines = ["📊 *Skor Terakhir:*"]
         if last_signal_scores:
             for sym, sc in last_signal_scores.items():
                 name = ASSETS.get(sym, sym)
-                lines.append(f"\u2022 {name}: {sc}/8")
+                lines.append(f"• {escape_markdown(name)}: {sc}")
         else:
             lines.append("_Belum ada scan_")
-        lines.append(f"\n\u23f3 Pending: {len(pending_signals)}")
-        b.reply_to(message, "\n".join(lines), parse_mode="Markdown")
+        lines.append(f"\n⏳ Pending: {len(pending_signals)}")
+        b.reply_to(message, "\n".join(lines), parse_mode="MarkdownV2")
+
+    @b.message_handler(commands=["backtest"])
+    def cmd_backtest(message):
+        b.reply_to(message, "⏳ _Menjalankan backtest 7 hari terakhir\\.\\.\\._", parse_mode="MarkdownV2")
+        result = run_backtest()
+        msg = (
+            f"📈 *HASIL BACKTEST 7 HARI*\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Total sinyal: {result['total_signals']}\n"
+            f"Win \\(estimasi\\): {result['wins']}\n"
+            f"Loss \\(estimasi\\): {result['losses']}\n"
+            f"Win Rate: {result['win_rate']:.1f}\\%\n"
+            f"Rata\\-rata/hari: {result['avg_per_day']:.1f} sinyal\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"_Simulasi expiry 5m, asumsi win jika harga bergerak searah ≥ 0\\.5x ATR_"
+        )
+        b.reply_to(message, msg, parse_mode="MarkdownV2")
 
 # ==================== SESSION DETECTION ====================
 def get_session_name(hour_utc):
@@ -112,19 +144,22 @@ def get_session_name(hour_utc):
     in_ny = NY_OPEN_UTC <= hour_utc < NY_CLOSE_UTC
     in_overlap = OVERLAP_START_UTC <= hour_utc < OVERLAP_END_UTC
     if in_overlap:
-        return "\U0001f525 Overlap London+NY (TERBAIK)"
+        return "🔥 Overlap London+NY (TERBAIK)"
     elif in_london and in_ny:
-        return "\u2705 London + New York"
+        return "✅ London + New York"
     elif in_london:
-        return "\u2705 London"
+        return "✅ London"
     elif in_ny:
-        return "\u2705 New York"
+        return "✅ New York"
     else:
-        return "\u26a0\ufe0f Off-Hours (market sepi)"
+        return "⚠️ Off-Hours (market sepi)"
 
 def is_active_session(hour_utc):
     return (LONDON_OPEN_UTC <= hour_utc < LONDON_CLOSE_UTC) or \
            (NY_OPEN_UTC <= hour_utc < NY_CLOSE_UTC)
+
+def is_news_hour(hour_utc):
+    return hour_utc in HIGH_IMPACT_NEWS_HOURS_UTC
 
 # ==================== DATA FETCHING ====================
 def fetch_prices(symbol, days=3):
@@ -286,7 +321,20 @@ def detect_candle_pattern(opens, highs, lows, closes):
         return "shooting_star"
     return "none"
 
-# ==================== ANTI-NOISE: ATR VOLATILITY FILTER ====================
+def check_wick_filter(opens, highs, lows, closes):
+    if len(closes) < 2:
+        return True, "data kurang"
+    o, h, l, c = opens[-1], highs[-1], lows[-1], closes[-1]
+    body = abs(c - o)
+    total_range = h - l
+    if total_range == 0:
+        return True, "range=0"
+    wick_ratio = (total_range - body) / total_range
+    if wick_ratio > 0.7:
+        return False, f"Wick {wick_ratio:.0%} > 70% (indecision)"
+    return True, f"Wick {wick_ratio:.0%} OK"
+
+# ==================== ANTI-NOISE: ATR FILTER ====================
 def check_atr_filter(highs, lows, closes):
     atr_series = calc_atr_series(highs, lows, closes, 14)
     if len(atr_series) < 20:
@@ -302,7 +350,7 @@ def check_atr_filter(highs, lows, closes):
         return False, f"Market chaos ({atr_ratio:.2f}x avg)"
     return True, f"ATR {atr_ratio:.2f}x normal"
 
-# ==================== ANALISIS 8-LAYER + FILTER KETAT EXPIRY 5M ====================
+# ==================== ANALISIS 8-LAYER + FILTER KETAT ====================
 def analyze(symbol):
     closes, highs, lows, opens, volumes = fetch_prices(symbol)
     if not closes or len(closes) < 80:
@@ -333,6 +381,7 @@ def analyze(symbol):
     if len(ema9_s) < 3 or len(ema21_s) < 3:
         basic["signal"] = "WAIT"
         basic["score"] = 0
+        basic["raw_score"] = 0
         basic["reasons"] = ["Data EMA kurang"]
         basic["trend"] = "FLAT"
         return basic
@@ -352,15 +401,25 @@ def analyze(symbol):
     if not golden_cross and not death_cross:
         basic["signal"] = "WAIT"
         basic["score"] = 0
+        basic["raw_score"] = 0
         basic["reasons"] = [f"Trend {basic['trend']} | Tidak ada cross"]
         return basic
 
-    # ANTI-NOISE: ATR Filter
     atr_ok, atr_reason = check_atr_filter(highs, lows, closes)
     if not atr_ok:
         basic["signal"] = "WAIT"
         basic["score"] = 0
+        basic["raw_score"] = 0
         basic["reasons"] = [atr_reason]
+        basic["filtered"] = True
+        return basic
+
+    wick_ok, wick_reason = check_wick_filter(opens, highs, lows, closes)
+    if not wick_ok:
+        basic["signal"] = "WAIT"
+        basic["score"] = 0
+        basic["raw_score"] = 0
+        basic["reasons"] = [wick_reason]
         basic["filtered"] = True
         return basic
 
@@ -368,11 +427,9 @@ def analyze(symbol):
     score = 0.0
     reasons = []
 
-    # Layer 1: EMA 9/21 Crossover — 1.5pt
     score += 1.5
     reasons.append(f"EMA9/21 {'⬆' if golden_cross else '⬇'} (+1.5)")
 
-    # Layer 2: EMA 55 Trend — 1.0pt
     if golden_cross and price > ema55:
         score += 1.0
         reasons.append("> EMA55 (+1.0)")
@@ -380,12 +437,10 @@ def analyze(symbol):
         score += 1.0
         reasons.append("< EMA55 (+1.0)")
 
-    # Layer 3: RSI Zone 35-65 — 1.0pt
     if 35 <= rsi <= 65:
         score += 1.0
         reasons.append(f"RSI {rsi} (+1.0)")
 
-    # Layer 4: MACD(8,17,9) — 1.0pt
     if golden_cross and macd_hist > 0:
         score += 1.0
         reasons.append(f"MACD + (+1.0)")
@@ -393,12 +448,10 @@ def analyze(symbol):
         score += 1.0
         reasons.append(f"MACD - (+1.0)")
 
-    # Layer 5: Bollinger Bands — 0.5pt
     if bb_lower < price < bb_upper:
         score += 0.5
         reasons.append("Dalam BB (+0.5)")
 
-    # Layer 6: ADX Trend Strength — 1.0pt
     if adx_val > 20:
         score += 1.0
         reasons.append(f"ADX {adx_val} kuat (+1.0)")
@@ -406,7 +459,6 @@ def analyze(symbol):
         score += 0.5
         reasons.append(f"ADX {adx_val} sedang (+0.5)")
 
-    # Layer 7: Volume Spike — 0.5pt
     if vol_ratio > 1.2:
         score += 0.5
         reasons.append(f"Vol {vol_ratio}x (+0.5)")
@@ -414,7 +466,6 @@ def analyze(symbol):
         score += 0.25
         reasons.append(f"Vol {vol_ratio}x (+0.25)")
 
-    # Layer 8: Candlestick Pattern — 0.5pt
     if golden_cross and candle_pat in ("bullish_engulfing", "hammer"):
         score += 0.5
         reasons.append(f"{candle_pat.replace('_',' ').title()} (+0.5)")
@@ -422,49 +473,41 @@ def analyze(symbol):
         score += 0.5
         reasons.append(f"{candle_pat.replace('_',' ').title()} (+0.5)")
 
-    # Normalize to /8 scale
     score_norm = round(score / 7.0 * 8.0, 1)
     basic["score"] = score_norm
+    basic["raw_score"] = round(score, 1)
     basic["reasons"] = reasons
     basic["direction"] = direction
 
-    # ============================================================
-    # FILTER KETAT KHUSUS EXPIRY 5 MENIT (1 CANDLE)
-    # ============================================================
     if EXPIRY_MINUTES <= TIMEFRAME_MINUTES:
-        # Gate 1: ADX harus ≥ 22
         if adx_val < 22:
             basic["signal"] = "WAIT"
             basic["filtered"] = True
             basic["reasons"] = [f"ADX {adx_val} < 22 (terlalu lemah untuk 1 candle)"]
             return basic
 
-        # Gate 2: Volume harus ≥ 1.3x
         if vol_ratio < 1.3:
             basic["signal"] = "WAIT"
             basic["filtered"] = True
-            basic["reasons"] = [f"Volume {vol_ratio}x < 1.3x (momentum kurang untuk 1 candle)"]
+            basic["reasons"] = [f"Volume {vol_ratio}x < 1.3x (momentum kurang)"]
             return basic
 
-        # Gate 3: Candle pattern WAJIB ada
         valid_patterns = ("bullish_engulfing", "bearish_engulfing", "hammer", "shooting_star")
         if candle_pat not in valid_patterns:
             basic["signal"] = "WAIT"
             basic["filtered"] = True
-            basic["reasons"] = [f"Tidak ada candle pattern konfirmasi (wajib untuk expiry 5m)"]
+            basic["reasons"] = ["Tidak ada candle pattern konfirmasi (wajib expiry 5m)"]
             return basic
 
-        # Gate 4: Minimum score lebih tinggi
         effective_min_score = max(MIN_SCORE_BASE, 5.0)
     else:
         effective_min_score = MIN_SCORE_BASE
 
     if score_norm < effective_min_score:
         basic["signal"] = "WAIT"
-        basic["reasons"] = [f"Skor {score_norm} < {effective_min_score} (filter ketat expiry 5m)"]
+        basic["reasons"] = [f"Skor {score_norm}/8 < {effective_min_score} (filter ketat)"]
         return basic
 
-    # SL/TP based on ATR
     if direction == "CALL":
         basic["sl"] = round(price - 1.5 * atr, 5)
         basic["tp"] = round(price + 2.5 * atr, 5)
@@ -475,7 +518,7 @@ def analyze(symbol):
     basic["signal"] = direction
     return basic
 
-# ==================== COOLDOWN PER ASET ====================
+# ==================== COOLDOWN ====================
 def is_on_cooldown(symbol):
     last = cooldown_tracker.get(symbol, 0)
     return (time.time() - last) < (COOLDOWN_MIN * 60)
@@ -483,15 +526,139 @@ def is_on_cooldown(symbol):
 def set_cooldown(symbol):
     cooldown_tracker[symbol] = time.time()
 
+# ==================== FORMAT: EARLY WARNING ====================
+def format_early_warning(name, symbol, result):
+    sig = result["signal"]
+    emoji = "🟢" if sig == "CALL" else "🔴"
+    score = result["score"]
+    raw = result.get("raw_score", 0)
+    p = result["price"]
+    session = get_session_name(datetime.datetime.utcnow().hour)
+
+    score_int = int(score)
+    score_bar = ""
+    for i in range(8):
+        if i < score_int:
+            score_bar += "🟢"
+        elif i < score:
+            score_bar += "🟡"
+        else:
+            score_bar += "⚫"
+
+    entry_instruction = "🟢 PERSIAPAN BELI NAIK (CALL)" if sig == "CALL" else "🔴 PERSIAPAN BELI TURUN (PUT)"
+
+    safe_name = escape_markdown(name)
+    safe_symbol = escape_markdown(symbol)
+    safe_price = escape_markdown(f"{p:.5f}")
+    safe_session = escape_markdown(session)
+
+    lines = [
+        f"⏰ {emoji} *EARLY WARNING — {safe_name}*",
+        f"📊 `{safe_symbol}` | TF: {TIMEFRAME_MINUTES}m | Expiry: {EXPIRY_MINUTES}m",
+        "━━━━━━━━━━━━━━━━━━━",
+        entry_instruction,
+        f"⏳ *Entry dalam {EARLY_WARNING_SECONDS // 60} menit — siapkan platform\\!*",
+        "━━━━━━━━━━━━━━━━━━━",
+        f"*Skor: {score}/8* \\(raw {raw}/7\\) {score_bar}",
+        f"🕐 {safe_session}",
+        "━━━━━━━━━━━━━━━━━━━",
+        f"💰 Harga saat ini: `{safe_price}`",
+        f"🎯 TP: `{escape_markdown(str(result.get('tp', 'N/A')))}`",
+        f"🛑 SL: `{escape_markdown(str(result.get('sl', 'N/A')))}`",
+        "━━━━━━━━━━━━━━━━━━━",
+        "📋 _Checklist persiapan:_",
+        "  1\\. Buka Stockity",
+        "  2\\. Pilih aset yang sesuai",
+        "  3\\. Set expiry 5 menit",
+        "  4\\. Tunggu pesan ENTRY berikutnya",
+        "━━━━━━━━━━━━━━━━━━━",
+        "💰 _Rekomendasi stake: 1\\-2\\% saldo_",
+        "🛑 _Max loss/hari: 5\\% saldo_",
+    ]
+    return "\n".join(lines)
+
+# ==================== FORMAT: SIGNAL ALERT (ENTRY) ====================
+def format_signal_alert(name, symbol, result):
+    sig = result["signal"]
+    emoji = "🟢" if sig == "CALL" else "🔴"
+    score = result["score"]
+    raw = result.get("raw_score", 0)
+    p = result["price"]
+    session = get_session_name(datetime.datetime.utcnow().hour)
+
+    score_int = int(score)
+    score_bar = ""
+    for i in range(8):
+        if i < score_int:
+            score_bar += "🟢"
+        elif i < score:
+            score_bar += "🟡"
+        else:
+            score_bar += "⚫"
+
+    if score >= 7:
+        strength = "🔥 SANGAT KUAT"
+    elif score >= 5.5:
+        strength = "💪 KUAT"
+    else:
+        strength = "✅ STANDAR (filter ketat lolos)"
+
+    entry_instruction = "🟢 LANGSUNG BELI NAIK (CALL)" if sig == "CALL" else "🔴 LANGSUNG BELI TURUN (PUT)"
+
+    safe_name = escape_markdown(name)
+    safe_symbol = escape_markdown(symbol)
+    safe_price = escape_markdown(f"{p:.5f}")
+    safe_session = escape_markdown(session)
+
+    lines = [
+        f"🚨 {emoji} *{sig} SIGNAL — {safe_name}*",
+        f"📊 `{safe_symbol}` | TF: {TIMEFRAME_MINUTES}m | Expiry: {EXPIRY_MINUTES}m",
+        "━━━━━━━━━━━━━━━━━━━",
+        entry_instruction,
+        f"⚡ *ENTRY SEKARANG — JANGAN TUNDA\\!*",
+        f"🎯 *Expiry: {EXPIRY_MINUTES} Menit \\(MAX PLATFORM\\)*",
+        "━━━━━━━━━━━━━━━━━━━",
+        f"*Skor: {score}/8* \\(raw {raw}/7\\) {score_bar}",
+        f"{strength}",
+        f"🕐 {safe_session}",
+        "━━━━━━━━━━━━━━━━━━━",
+        f"💰 Entry: `{safe_price}`",
+        f"🎯 TP: `{escape_markdown(str(result.get('tp', 'N/A')))}`",
+        f"🛑 SL: `{escape_markdown(str(result.get('sl', 'N/A')))}`",
+        f"📈 RR: 1:1\\.67",
+        "━━━━━━━━━━━━━━━━━━━",
+        "✅ _Re\\-validasi lolos — kondisi masih valid_",
+        "ℹ️ _Filter: ADX≥22, Vol≥1\\.3x, Pattern wajib, Wick OK_",
+        "━━━━━━━━━━━━━━━━━━━",
+        "💰 _Stake: 1\\-2\\% saldo_",
+        "🛑 _Max loss/hari: 5\\% saldo_",
+    ]
+    return "\n".join(lines)
+
+# ==================== FORMAT: CANCELLED ====================
+def format_cancelled(name, symbol, reason):
+    safe_name = escape_markdown(name)
+    safe_symbol = escape_markdown(symbol)
+    safe_reason = escape_markdown(reason)
+    lines = [
+        f"⚠️ *SINYAL DIBATALKAN — {safe_name}*",
+        f"📊 `{safe_symbol}`",
+        "━━━━━━━━━━━━━━━━━━━",
+        f"❌ Alasan: {safe_reason}",
+        "━━━━━━━━━━━━━━━━━━━",
+        "_Jangan entry — tunggu sinyal berikutnya_",
+    ]
+    return "\n".join(lines)
+
 # ==================== FORMAT: MARKET UPDATE ====================
 def format_market_update(symbol, result):
     name = ASSETS.get(symbol, symbol)
-    now_wib = (datetime.datetime.utcnow() + datetime.timedelta(hours=7)).strftime("%H:%M")
+    now_local = (datetime.datetime.utcnow() + datetime.timedelta(hours=TIMEZONE_OFFSET_HOURS)).strftime("%H:%M")
     hour_utc = datetime.datetime.utcnow().hour
     session = get_session_name(hour_utc)
 
     if not result:
-        return f"\U0001f4ca *{name} UPDATE* | {now_wib} WIB\n_Data error_"
+        return f"📊 *{escape_markdown(name)} UPDATE* | {now_local} {TIMEZONE_LABEL}\n_Data error_"
 
     price = result.get("price", 0)
     rsi = result.get("rsi", 0)
@@ -502,56 +669,193 @@ def format_market_update(symbol, result):
     vol = result.get("vol_ratio", 0)
     candle = result.get("candle_pattern", "none")
 
-    rsi_e = "\U0001f534" if rsi > 65 else ("\U0001f7e2" if rsi < 35 else "\u26aa")
-    sig_e = "\U0001f7e2" if sig == "CALL" else ("\U0001f534" if sig == "PUT" else "\u23f3")
-    t_arrow = "\u2b06\ufe0f" if trend == "UP" else ("\u2b07\ufe0f" if trend == "DOWN" else "\u27a1\ufe0f")
-    price_str = f"{price:.5f}"
+    rsi_e = "🔴" if rsi > 65 else ("🟢" if rsi < 35 else "⚪")
+    sig_e = "🟢" if sig == "CALL" else ("🔴" if sig == "PUT" else "⏳")
+    t_arrow = "⬆️" if trend == "UP" else ("⬇️" if trend == "DOWN" else "➡️")
+    price_str = escape_markdown(f"{price:.5f}")
 
     ema21 = result.get("ema21", 0)
-    pip_str = f"{(price - ema21) * 10000:+.1f} pip dari EMA21" if ema21 > 0 else ""
+    pip_str = escape_markdown(f"{(price - ema21) * 10000:+.1f} pip dari EMA21") if ema21 > 0 else ""
+
+    safe_name = escape_markdown(name)
+    safe_session = escape_markdown(session)
+    safe_candle = escape_markdown(candle.replace('_',' ').title())
 
     lines = [
-        f"\U0001f4ca *{name} LIVE UPDATE*",
-        f"\u23f0 {now_wib} WIB | {session}",
-        "\u2501" * 18,
+        f"📊 *{safe_name} LIVE UPDATE*",
+        f"⏰ {now_local} {TIMEZONE_LABEL} | {safe_session}",
+        "━━━━━━━━━━━━━━━━━━",
         f"{sig_e} *Harga:* `{price_str}` {t_arrow}",
-        f"\U0001f4cf {pip_str}",
+        f"📏 {pip_str}",
         "",
-        f"\U0001f4c9 RSI(14): {rsi_e} `{rsi}`",
-        f"\U0001f4ca ADX(14): `{adx}`",
-        f"\U0001f4e6 Volume: `{vol}x`",
-        f"\U0001f56f Pattern: `{candle.replace('_',' ').title()}`",
-        f"\U0001f3af Skor: `{score}/8`",
-        "\u2501" * 18,
+        f"📉 RSI\\(14\\): {rsi_e} `{rsi}`",
+        f"📊 ADX\\(14\\): `{adx}`",
+        f"📦 Volume: `{vol}x`",
+        f"🕯 Pattern: `{safe_candle}`",
+        f"🎯 Skor: `{score}/8`",
+        "━━━━━━━━━━━━━━━━━━",
     ]
 
     if sig in ("CALL", "PUT"):
-        lines.append(f"\U0001f6a8 *SINYAL {sig} TERKIRIM!*")
+        lines.append(f"🚨 *SINYAL {sig} TERKIRIM\\!*")
     else:
         reason = result.get("reasons", [""])[0] if result.get("reasons") else "Menunggu..."
-        lines.append(f"\u23f3 {reason}")
+        lines.append(f"⏳ {escape_markdown(reason)}")
 
-    lines += ["", f"\U0001f550 Jam terbaik: 20:00-23:00 WIB", "_@Aswadd_bot Multi-Asset Final_"]
+    lines += ["", f"🕐 Jam terbaik: 21:00\\-00:00 {TIMEZONE_LABEL}", "_@Aswadd\\_bot Multi\\-Asset Final v2_"]
     return "\n".join(lines)
 
-# ==================== FORMAT: SIGNAL ALERT (TEGAS) ====================
-def format_signal_alert(name, symbol, result):
-    sig   = result["signal"]
-    emoji = "\U0001f7e2" if sig == "CALL" else "\U0001f534"
-    score = result["score"]
-    p     = result["price"]
-    hour_utc = datetime.datetime.utcnow().hour
-    session = get_session_name(hour_utc)
+# ==================== BACKTEST ====================
+def run_backtest():
+    total_signals = 0
+    wins = 0
+    losses = 0
 
-    score_int = int(score)
-    score_bar = ""
-    for i in range(8):
-        if i < score_int:
-            score_bar += "\U0001f7e2"
-        elif i < score:
-            score_bar += "\U0001f7e1"
-        else:
-            score_bar += "\u26ab"
+    for symbol in ASSETS.keys():
+        closes, highs, lows, opens, volumes = fetch_prices(symbol, days=7)
+        if not closes or len(closes) < 200:
+            continue
 
-    if score >= 7:
-        strength = "\U0001f5
+        for i in range(100, len(closes) - 1):
+            window_closes = closes[:i+1]
+            window_highs = highs[:i+1]
+            window_lows = lows[:i+1]
+            window_opens = opens[:i+1]
+            window_volumes = volumes[:i+1]
+
+            if len(window_closes) < 80:
+                continue
+
+            ema9_s = calc_ema_series(window_closes, 9)
+            ema21_s = calc_ema_series(window_closes, 21)
+            if len(ema9_s) < 3 or len(ema21_s) < 3:
+                continue
+
+            prev_diff = ema9_s[-3] - ema21_s[-3]
+            curr_diff = ema9_s[-1] - ema21_s[-1]
+            golden_cross = prev_diff <= 0 and curr_diff > 0
+            death_cross = prev_diff >= 0 and curr_diff < 0
+
+            if not golden_cross and not death_cross:
+                continue
+
+            adx_val, _, _ = calc_adx(window_highs, window_lows, window_closes)
+            vol_ratio = calc_volume_ratio(window_volumes)
+            candle_pat = detect_candle_pattern(window_opens, window_highs, window_lows, window_closes)
+
+            if adx_val < 22 or vol_ratio < 1.3:
+                continue
+            valid_patterns = ("bullish_engulfing", "bearish_engulfing", "hammer", "shooting_star")
+            if candle_pat not in valid_patterns:
+                continue
+
+            atr = calc_atr(window_highs, window_lows, window_closes)
+            entry_price = window_closes[-1]
+            next_price = closes[i+1]
+
+            total_signals += 1
+            if golden_cross and next_price > entry_price + 0.5 * atr:
+                wins += 1
+            elif death_cross and next_price < entry_price - 0.5 * atr:
+                wins += 1
+            else:
+                losses += 1
+
+    total = wins + losses
+    win_rate = (wins / total * 100) if total > 0 else 0
+    avg_per_day = total / 7.0 if total > 0 else 0
+
+    return {
+        "total_signals": total,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "avg_per_day": avg_per_day
+    }
+
+# ==================== MAIN LOOP ====================
+def process_signal_with_delay(b, symbol, name, result):
+    try:
+        warning_msg = format_early_warning(name, symbol, result)
+        b.send_message(CHAT_ID, warning_msg, parse_mode="MarkdownV2")
+        pending_signals[symbol] = result
+
+        time.sleep(EARLY_WARNING_SECONDS)
+
+        recheck = analyze(symbol)
+        if not recheck or recheck.get("signal") != result["signal"]:
+            cancel_msg = format_cancelled(name, symbol, "Kondisi berubah setelah re-validasi")
+            b.send_message(CHAT_ID, cancel_msg, parse_mode="MarkdownV2")
+            pending_signals.pop(symbol, None)
+            return
+
+        alert_msg = format_signal_alert(name, symbol, recheck)
+        b.send_message(CHAT_ID, alert_msg, parse_mode="MarkdownV2")
+        set_cooldown(symbol)
+        pending_signals.pop(symbol, None)
+
+    except Exception as e:
+        print(f"[SIGNAL ERROR] {symbol}: {e}")
+        pending_signals.pop(symbol, None)
+
+def scan_loop():
+    while True:
+        try:
+            b = get_bot()
+            utc_hour = datetime.datetime.utcnow().hour
+
+            if not is_active_session(utc_hour):
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            if is_news_hour(utc_hour):
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            for symbol, name in ASSETS.items():
+                if is_on_cooldown(symbol):
+                    continue
+                if symbol in pending_signals:
+                    continue
+
+                result = analyze(symbol)
+                if not result:
+                    continue
+
+                last_signal_scores[symbol] = f"{result.get('score', 0)}/8 (raw {result.get('raw_score', 0)}/7)"
+
+                sig = result.get("signal", "WAIT")
+                if sig in ("CALL", "PUT"):
+                    t = threading.Thread(target=process_signal_with_delay, args=(b, symbol, name, result), daemon=True)
+                    t.start()
+                else:
+                    update = format_market_update(symbol, result)
+                    try:
+                        b.send_message(CHAT_ID, update, parse_mode="MarkdownV2")
+                    except Exception as e:
+                        print(f"[SEND ERROR] {symbol}: {e}")
+
+        except Exception as e:
+            print(f"[SCAN ERROR] {e}")
+
+        time.sleep(CHECK_INTERVAL)
+
+# ==================== FLASK ROUTE ====================
+@app.route("/")
+def index():
+    return "Aswadd Bot Multi-Asset Final v2 is running!"
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    b = get_bot()
+    json_str = flask_request.get_data().decode("UTF-8")
+    update = telebot.types.Update.de_json(json_str)
+    b.process_new_updates([update])
+    return "OK", 200
+
+# ==================== START ====================
+if __name__ == "__main__":
+    scanner = threading.Thread(target=scan_loop, daemon=True)
+    scanner.start()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
