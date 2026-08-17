@@ -1,4 +1,4 @@
-import os
+    import os
 import re
 import time
 import datetime
@@ -62,11 +62,12 @@ def setup_handlers(b):
     def cmd_start(message):
         asset_list = "\n".join([f"  • {html_escape(v)}" for v in ASSETS.values()])
         b.reply_to(message,
-            f"🤖 <b>Aswadd Bot Multi-Asset Final v2</b>\n\n"
-            f"📊 Update TIAP {TIMEFRAME_MINUTES} MENIT\n"
-            f"⏰ Early Warning: 1 menit sebelum entry\n"
-            f"🔄 Re-validasi otomatis sebelum ENTRY\n"
-            f"🚨 Sinyal CALL/PUT saat skor tinggi\n\n"
+            f"🤖 <b>Aswadd Bot Multi-Asset Final v3</b>\n\n"
+            f"🔕 <b>MODE SENYAP AKTIF</b>\n"
+            f"Bot hanya kirim notifikasi saat ada sinyal:\n"
+            f"  🔔 Early Warning (persiapan)\n"
+            f"  🚨 Entry Signal (eksekusi)\n"
+            f"  ⚠️ Cancelled (jika re-check gagal)\n\n"
             f"<b>Spesifikasi:</b>\n"
             f"• Market:\n{asset_list}\n"
             f"• TF: {TIMEFRAME_MINUTES} Menit\n"
@@ -97,7 +98,7 @@ def setup_handlers(b):
         session = get_session_name(hour)
         active_assets = [v for k, v in ASSETS.items()]
         b.reply_to(message,
-            f"✅ <b>Bot Aktif!</b>\n"
+            f"✅ <b>Bot Aktif — Mode Senyap</b>\n"
             f"Aset: {html_escape(', '.join(active_assets))}\n"
             f"Min skor: {MIN_SCORE_BASE}/8\n"
             f"Expiry: {EXPIRY_MINUTES}m (fixed)\n"
@@ -105,7 +106,8 @@ def setup_handlers(b):
             f"Cooldown: {COOLDOWN_MIN} menit/aset\n"
             f"Pending confirm: {len(pending_signals)}\n"
             f"Sesi sekarang: {html_escape(session)}\n"
-            f"Update tiap {TIMEFRAME_MINUTES} menit",
+            f"Update tiap {TIMEFRAME_MINUTES} menit\n\n"
+            f"🔕 <i>Tidak ada market update rutin.\nNotifikasi hanya saat sinyal muncul.</i>",
             parse_mode="HTML")
 
     @b.message_handler(commands=["score"])
@@ -525,7 +527,7 @@ def is_on_cooldown(symbol):
 def set_cooldown(symbol):
     cooldown_tracker[symbol] = time.time()
 
-# ==================== FORMAT: EARLY WARNING ====================
+# ==================== FORMAT: EARLY WARNING (BERDERING) ====================
 def format_early_warning(name, symbol, result):
     sig = result["signal"]
     emoji = "🟢" if sig == "CALL" else "🔴"
@@ -547,7 +549,7 @@ def format_early_warning(name, symbol, result):
     entry_instruction = "🟢 PERSIAPAN BELI NAIK (CALL)" if sig == "CALL" else "🔴 PERSIAPAN BELI TURUN (PUT)"
 
     lines = [
-        f"⏰ {emoji} <b>EARLY WARNING — {html_escape(name)}</b>",
+        f"🔔🔔⏰ {emoji} <b>EARLY WARNING — {html_escape(name)}</b>",
         f"📊 <code>{html_escape(symbol)}</code> | TF: {TIMEFRAME_MINUTES}m | Expiry: {EXPIRY_MINUTES}m",
         "━━━━━━━━━━━━━━━━━━━",
         entry_instruction,
@@ -571,7 +573,7 @@ def format_early_warning(name, symbol, result):
     ]
     return "\n".join(lines)
 
-# ==================== FORMAT: SIGNAL ALERT (ENTRY) ====================
+# ==================== FORMAT: SIGNAL ALERT (BERDERING) ====================
 def format_signal_alert(name, symbol, result):
     sig = result["signal"]
     emoji = "🟢" if sig == "CALL" else "🔴"
@@ -624,66 +626,16 @@ def format_signal_alert(name, symbol, result):
     ]
     return "\n".join(lines)
 
-# ==================== FORMAT: CANCELLED ====================
+# ==================== FORMAT: CANCELLED (BERDERING) ====================
 def format_cancelled(name, symbol, reason):
     lines = [
-        f"⚠️ <b>SINYAL DIBATALKAN — {html_escape(name)}</b>",
+        f"⚠️⚠️ <b>SINYAL DIBATALKAN — {html_escape(name)}</b>",
         f"📊 <code>{html_escape(symbol)}</code>",
         "━━━━━━━━━━━━━━━━━━━",
         f"❌ Alasan: {html_escape(reason)}",
         "━━━━━━━━━━━━━━━━━━━",
         "<i>Jangan entry — tunggu sinyal berikutnya</i>",
     ]
-    return "\n".join(lines)
-
-# ==================== FORMAT: MARKET UPDATE ====================
-def format_market_update(symbol, result):
-    name = ASSETS.get(symbol, symbol)
-    now_local = (datetime.datetime.utcnow() + datetime.timedelta(hours=TIMEZONE_OFFSET_HOURS)).strftime("%H:%M")
-    hour_utc = datetime.datetime.utcnow().hour
-    session = get_session_name(hour_utc)
-
-    if not result:
-        return f"📊 <b>{html_escape(name)} UPDATE</b> | {now_local} {TIMEZONE_LABEL}\n<i>Data error</i>"
-
-    price = result.get("price", 0)
-    rsi = result.get("rsi", 0)
-    score = result.get("score", 0)
-    sig = result.get("signal", "WAIT")
-    trend = result.get("trend", "FLAT")
-    adx = result.get("adx", 0)
-    vol = result.get("vol_ratio", 0)
-    candle = result.get("candle_pattern", "none")
-
-    rsi_e = "🔴" if rsi > 65 else ("🟢" if rsi < 35 else "⚪")
-    sig_e = "🟢" if sig == "CALL" else ("🔴" if sig == "PUT" else "⏳")
-    t_arrow = "⬆️" if trend == "UP" else ("⬇️" if trend == "DOWN" else "➡️")
-
-    ema21 = result.get("ema21", 0)
-    pip_str = f"{(price - ema21) * 10000:+.1f} pip dari EMA21" if ema21 > 0 else ""
-
-    lines = [
-        f"📊 <b>{html_escape(name)} LIVE UPDATE</b>",
-        f"⏰ {now_local} {TIMEZONE_LABEL} | {html_escape(session)}",
-        "━━━━━━━━━━━━━━━━━━",
-        f"{sig_e} <b>Harga:</b> <code>{price:.5f}</code> {t_arrow}",
-        f"📏 {pip_str}",
-        "",
-        f"📉 RSI(14): {rsi_e} <code>{rsi}</code>",
-        f"📊 ADX(14): <code>{adx}</code>",
-        f"📦 Volume: <code>{vol}x</code>",
-        f"🕯 Pattern: <code>{html_escape(candle.replace('_',' ').title())}</code>",
-        f"🎯 Skor: <code>{score}/8</code>",
-        "━━━━━━━━━━━━━━━━━━",
-    ]
-
-    if sig in ("CALL", "PUT"):
-        lines.append(f"🚨 <b>SINYAL {sig} TERKIRIM!</b>")
-    else:
-        reason = result.get("reasons", [""])[0] if result.get("reasons") else "Menunggu..."
-        lines.append(f"⏳ {html_escape(reason)}")
-
-    lines += ["", f"🕐 Jam terbaik: 21:00-00:00 {TIMEZONE_LABEL}", "<i>@Aswadd_bot Multi-Asset Final v2</i>"]
     return "\n".join(lines)
 
 # ==================== BACKTEST ====================
@@ -809,12 +761,6 @@ def scan_loop():
                 if sig in ("CALL", "PUT"):
                     t = threading.Thread(target=process_signal_with_delay, args=(b, symbol, name, result), daemon=True)
                     t.start()
-                else:
-                    update = format_market_update(symbol, result)
-                    try:
-                        b.send_message(CHAT_ID, update, parse_mode="HTML")
-                    except Exception as e:
-                        print(f"[SEND ERROR] {symbol}: {e}")
 
         except Exception as e:
             print(f"[SCAN ERROR] {e}")
@@ -824,7 +770,7 @@ def scan_loop():
 # ==================== FLASK ROUTE ====================
 @app.route("/")
 def index():
-    return "Aswadd Bot Multi-Asset Final v2 is running!"
+    return "Aswadd Bot Multi-Asset Final v3 is running!"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
