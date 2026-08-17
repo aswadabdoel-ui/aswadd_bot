@@ -37,9 +37,8 @@ OVERLAP_END_UTC   = 16
 HIGH_IMPACT_NEWS_HOURS_UTC = [12, 13, 14]
 
 # ==================== HELPER ====================
-def escape_markdown(text):
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', str(text))
+def html_escape(text):
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 # ==================== FLASK APP ====================
 app = Flask(__name__)
@@ -61,35 +60,35 @@ def get_bot():
 def setup_handlers(b):
     @b.message_handler(commands=["start"])
     def cmd_start(message):
-        asset_list = "\n".join([f"  • {v}" for v in ASSETS.values()])
+        asset_list = "\n".join([f"  • {html_escape(v)}" for v in ASSETS.values()])
         b.reply_to(message,
-            f"🤖 *Aswadd Bot Multi\\-Asset Final v2*\n\n"
+            f"🤖 <b>Aswadd Bot Multi-Asset Final v2</b>\n\n"
             f"📊 Update TIAP {TIMEFRAME_MINUTES} MENIT\n"
             f"⏰ Early Warning: 1 menit sebelum entry\n"
-            f"🔄 Re\\-validasi otomatis sebelum ENTRY\n"
+            f"🔄 Re-validasi otomatis sebelum ENTRY\n"
             f"🚨 Sinyal CALL/PUT saat skor tinggi\n\n"
-            f"*Spesifikasi:*\n"
+            f"<b>Spesifikasi:</b>\n"
             f"• Market:\n{asset_list}\n"
             f"• TF: {TIMEFRAME_MINUTES} Menit\n"
-            f"• Expiry: {EXPIRY_MINUTES} Menit \\(MAX PLATFORM\\)\n"
-            f"• Entry: 1 menit setelah warning \\+ re\\-check\n"
-            f"• Min Score: {MIN_SCORE_BASE}/8 \\(diperketat\\)\n"
+            f"• Expiry: {EXPIRY_MINUTES} Menit (MAX PLATFORM)\n"
+            f"• Entry: 1 menit setelah warning + re-check\n"
+            f"• Min Score: {MIN_SCORE_BASE}/8 (diperketat)\n"
             f"• Cooldown: {COOLDOWN_MIN} menit/aset\n\n"
-            f"*Filter Ketat Expiry 5m:*\n"
-            f"• EMA 9/21/55 \\+ Cross\n"
-            f"• RSI\\(14\\) Zone 35\\-65\n"
-            f"• MACD\\(8,17,9\\)\n"
-            f"• Bollinger Bands\\(20,2\\)\n"
-            f"• ADX\\(14\\) ≥ 22\n"
-            f"• Volume Spike ≥ 1\\.3x\n"
+            f"<b>Filter Ketat Expiry 5m:</b>\n"
+            f"• EMA 9/21/55 + Cross\n"
+            f"• RSI(14) Zone 35-65\n"
+            f"• MACD(8,17,9)\n"
+            f"• Bollinger Bands(20,2)\n"
+            f"• ADX(14) ≥ 22\n"
+            f"• Volume Spike ≥ 1.3x\n"
             f"• Candlestick Pattern WAJIB\n"
-            f"• Wick Filter \\(max 70\\% body\\)\n"
-            f"• ATR Filter \\+ News Hours Block\n\n"
-            f"*Jam Terbaik:* 21:00\\-00:00 {TIMEZONE_LABEL}\n"
-            f"\\(London\\+NY Overlap\\)\n\n"
-            f"⚠️ _Data: Yahoo Finance \\(delay ~15\\-30 detik\\)_\n\n"
+            f"• Wick Filter (max 70% body)\n"
+            f"• ATR Filter + News Hours Block\n\n"
+            f"<b>Jam Terbaik:</b> 21:00-00:00 {TIMEZONE_LABEL}\n"
+            f"(London+NY Overlap)\n\n"
+            f"⚠️ <i>Data: Yahoo Finance (delay ~15-30 detik)</i>\n\n"
             f"/status /score /backtest",
-            parse_mode="MarkdownV2")
+            parse_mode="HTML")
 
     @b.message_handler(commands=["status"])
     def cmd_status(message):
@@ -98,45 +97,45 @@ def setup_handlers(b):
         session = get_session_name(hour)
         active_assets = [v for k, v in ASSETS.items()]
         b.reply_to(message,
-            f"✅ *Bot Aktif\\!*\n"
-            f"Aset: {escape_markdown(', '.join(active_assets))}\n"
+            f"✅ <b>Bot Aktif!</b>\n"
+            f"Aset: {html_escape(', '.join(active_assets))}\n"
             f"Min skor: {MIN_SCORE_BASE}/8\n"
-            f"Expiry: {EXPIRY_MINUTES}m \\(fixed\\)\n"
+            f"Expiry: {EXPIRY_MINUTES}m (fixed)\n"
             f"Early warning: {EARLY_WARNING_SECONDS // 60} menit\n"
             f"Cooldown: {COOLDOWN_MIN} menit/aset\n"
             f"Pending confirm: {len(pending_signals)}\n"
-            f"Sesi sekarang: {escape_markdown(session)}\n"
+            f"Sesi sekarang: {html_escape(session)}\n"
             f"Update tiap {TIMEFRAME_MINUTES} menit",
-            parse_mode="MarkdownV2")
+            parse_mode="HTML")
 
     @b.message_handler(commands=["score"])
     def cmd_score(message):
-        lines = ["📊 *Skor Terakhir:*"]
+        lines = ["📊 <b>Skor Terakhir:</b>"]
         if last_signal_scores:
             for sym, sc in last_signal_scores.items():
                 name = ASSETS.get(sym, sym)
-                lines.append(f"• {escape_markdown(name)}: {sc}")
+                lines.append(f"• {html_escape(name)}: {sc}")
         else:
-            lines.append("_Belum ada scan_")
+            lines.append("<i>Belum ada scan</i>")
         lines.append(f"\n⏳ Pending: {len(pending_signals)}")
-        b.reply_to(message, "\n".join(lines), parse_mode="MarkdownV2")
+        b.reply_to(message, "\n".join(lines), parse_mode="HTML")
 
     @b.message_handler(commands=["backtest"])
     def cmd_backtest(message):
-        b.reply_to(message, "⏳ _Menjalankan backtest 7 hari terakhir\\.\\.\\._", parse_mode="MarkdownV2")
+        b.reply_to(message, "⏳ <i>Menjalankan backtest 7 hari terakhir...</i>", parse_mode="HTML")
         result = run_backtest()
         msg = (
-            f"📈 *HASIL BACKTEST 7 HARI*\n"
+            f"📈 <b>HASIL BACKTEST 7 HARI</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"Total sinyal: {result['total_signals']}\n"
-            f"Win \\(estimasi\\): {result['wins']}\n"
-            f"Loss \\(estimasi\\): {result['losses']}\n"
-            f"Win Rate: {result['win_rate']:.1f}\\%\n"
-            f"Rata\\-rata/hari: {result['avg_per_day']:.1f} sinyal\n"
+            f"Win (estimasi): {result['wins']}\n"
+            f"Loss (estimasi): {result['losses']}\n"
+            f"Win Rate: {result['win_rate']:.1f}%\n"
+            f"Rata-rata/hari: {result['avg_per_day']:.1f} sinyal\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"_Simulasi expiry 5m, asumsi win jika harga bergerak searah ≥ 0\\.5x ATR_"
+            f"<i>Simulasi expiry 5m, asumsi win jika harga bergerak searah ≥ 0.5x ATR</i>"
         )
-        b.reply_to(message, msg, parse_mode="MarkdownV2")
+        b.reply_to(message, msg, parse_mode="HTML")
 
 # ==================== SESSION DETECTION ====================
 def get_session_name(hour_utc):
@@ -547,33 +546,28 @@ def format_early_warning(name, symbol, result):
 
     entry_instruction = "🟢 PERSIAPAN BELI NAIK (CALL)" if sig == "CALL" else "🔴 PERSIAPAN BELI TURUN (PUT)"
 
-    safe_name = escape_markdown(name)
-    safe_symbol = escape_markdown(symbol)
-    safe_price = escape_markdown(f"{p:.5f}")
-    safe_session = escape_markdown(session)
-
     lines = [
-        f"⏰ {emoji} *EARLY WARNING — {safe_name}*",
-        f"📊 `{safe_symbol}` | TF: {TIMEFRAME_MINUTES}m | Expiry: {EXPIRY_MINUTES}m",
+        f"⏰ {emoji} <b>EARLY WARNING — {html_escape(name)}</b>",
+        f"📊 <code>{html_escape(symbol)}</code> | TF: {TIMEFRAME_MINUTES}m | Expiry: {EXPIRY_MINUTES}m",
         "━━━━━━━━━━━━━━━━━━━",
         entry_instruction,
-        f"⏳ *Entry dalam {EARLY_WARNING_SECONDS // 60} menit — siapkan platform\\!*",
+        f"⏳ <b>Entry dalam {EARLY_WARNING_SECONDS // 60} menit — siapkan platform!</b>",
         "━━━━━━━━━━━━━━━━━━━",
-        f"*Skor: {score}/8* \\(raw {raw}/7\\) {score_bar}",
-        f"🕐 {safe_session}",
+        f"<b>Skor: {score}/8</b> (raw {raw}/7) {score_bar}",
+        f"🕐 {html_escape(session)}",
         "━━━━━━━━━━━━━━━━━━━",
-        f"💰 Harga saat ini: `{safe_price}`",
-        f"🎯 TP: `{escape_markdown(str(result.get('tp', 'N/A')))}`",
-        f"🛑 SL: `{escape_markdown(str(result.get('sl', 'N/A')))}`",
+        f"💰 Harga saat ini: <code>{p:.5f}</code>",
+        f"🎯 TP: <code>{result.get('tp', 'N/A')}</code>",
+        f"🛑 SL: <code>{result.get('sl', 'N/A')}</code>",
         "━━━━━━━━━━━━━━━━━━━",
-        "📋 _Checklist persiapan:_",
-        "  1\\. Buka Stockity",
-        "  2\\. Pilih aset yang sesuai",
-        "  3\\. Set expiry 5 menit",
-        "  4\\. Tunggu pesan ENTRY berikutnya",
+        "📋 <i>Checklist persiapan:</i>",
+        "  1. Buka Stockity",
+        "  2. Pilih aset yang sesuai",
+        "  3. Set expiry 5 menit",
+        "  4. Tunggu pesan ENTRY berikutnya",
         "━━━━━━━━━━━━━━━━━━━",
-        "💰 _Rekomendasi stake: 1\\-2\\% saldo_",
-        "🛑 _Max loss/hari: 5\\% saldo_",
+        "💰 <i>Rekomendasi stake: 1-2% saldo</i>",
+        "🛑 <i>Max loss/hari: 5% saldo</i>",
     ]
     return "\n".join(lines)
 
@@ -605,48 +599,40 @@ def format_signal_alert(name, symbol, result):
 
     entry_instruction = "🟢 LANGSUNG BELI NAIK (CALL)" if sig == "CALL" else "🔴 LANGSUNG BELI TURUN (PUT)"
 
-    safe_name = escape_markdown(name)
-    safe_symbol = escape_markdown(symbol)
-    safe_price = escape_markdown(f"{p:.5f}")
-    safe_session = escape_markdown(session)
-
     lines = [
-        f"🚨 {emoji} *{sig} SIGNAL — {safe_name}*",
-        f"📊 `{safe_symbol}` | TF: {TIMEFRAME_MINUTES}m | Expiry: {EXPIRY_MINUTES}m",
+        f"🚨 {emoji} <b>{sig} SIGNAL — {html_escape(name)}</b>",
+        f"📊 <code>{html_escape(symbol)}</code> | TF: {TIMEFRAME_MINUTES}m | Expiry: {EXPIRY_MINUTES}m",
         "━━━━━━━━━━━━━━━━━━━",
         entry_instruction,
-        f"⚡ *ENTRY SEKARANG — JANGAN TUNDA\\!*",
-        f"🎯 *Expiry: {EXPIRY_MINUTES} Menit \\(MAX PLATFORM\\)*",
+        f"⚡ <b>ENTRY SEKARANG — JANGAN TUNDA!</b>",
+        f"🎯 <b>Expiry: {EXPIRY_MINUTES} Menit (MAX PLATFORM)</b>",
         "━━━━━━━━━━━━━━━━━━━",
-        f"*Skor: {score}/8* \\(raw {raw}/7\\) {score_bar}",
+        f"<b>Skor: {score}/8</b> (raw {raw}/7) {score_bar}",
         f"{strength}",
-        f"🕐 {safe_session}",
+        f"🕐 {html_escape(session)}",
         "━━━━━━━━━━━━━━━━━━━",
-        f"💰 Entry: `{safe_price}`",
-        f"🎯 TP: `{escape_markdown(str(result.get('tp', 'N/A')))}`",
-        f"🛑 SL: `{escape_markdown(str(result.get('sl', 'N/A')))}`",
-        f"📈 RR: 1:1\\.67",
+        f"💰 Entry: <code>{p:.5f}</code>",
+        f"🎯 TP: <code>{result.get('tp', 'N/A')}</code>",
+        f"🛑 SL: <code>{result.get('sl', 'N/A')}</code>",
+        f"📈 RR: 1:1.67",
         "━━━━━━━━━━━━━━━━━━━",
-        "✅ _Re\\-validasi lolos — kondisi masih valid_",
-        "ℹ️ _Filter: ADX≥22, Vol≥1\\.3x, Pattern wajib, Wick OK_",
+        "✅ <i>Re-validasi lolos — kondisi masih valid</i>",
+        "ℹ️ <i>Filter: ADX≥22, Vol≥1.3x, Pattern wajib, Wick OK</i>",
         "━━━━━━━━━━━━━━━━━━━",
-        "💰 _Stake: 1\\-2\\% saldo_",
-        "🛑 _Max loss/hari: 5\\% saldo_",
+        "💰 <i>Stake: 1-2% saldo</i>",
+        "🛑 <i>Max loss/hari: 5% saldo</i>",
     ]
     return "\n".join(lines)
 
 # ==================== FORMAT: CANCELLED ====================
 def format_cancelled(name, symbol, reason):
-    safe_name = escape_markdown(name)
-    safe_symbol = escape_markdown(symbol)
-    safe_reason = escape_markdown(reason)
     lines = [
-        f"⚠️ *SINYAL DIBATALKAN — {safe_name}*",
-        f"📊 `{safe_symbol}`",
+        f"⚠️ <b>SINYAL DIBATALKAN — {html_escape(name)}</b>",
+        f"📊 <code>{html_escape(symbol)}</code>",
         "━━━━━━━━━━━━━━━━━━━",
-        f"❌ Alasan: {safe_reason}",
+        f"❌ Alasan: {html_escape(reason)}",
         "━━━━━━━━━━━━━━━━━━━",
-        "_Jangan entry — tunggu sinyal berikutnya_",
+        "<i>Jangan entry — tunggu sinyal berikutnya</i>",
     ]
     return "\n".join(lines)
 
@@ -658,7 +644,7 @@ def format_market_update(symbol, result):
     session = get_session_name(hour_utc)
 
     if not result:
-        return f"📊 *{escape_markdown(name)} UPDATE* | {now_local} {TIMEZONE_LABEL}\n_Data error_"
+        return f"📊 <b>{html_escape(name)} UPDATE</b> | {now_local} {TIMEZONE_LABEL}\n<i>Data error</i>"
 
     price = result.get("price", 0)
     rsi = result.get("rsi", 0)
@@ -672,37 +658,32 @@ def format_market_update(symbol, result):
     rsi_e = "🔴" if rsi > 65 else ("🟢" if rsi < 35 else "⚪")
     sig_e = "🟢" if sig == "CALL" else ("🔴" if sig == "PUT" else "⏳")
     t_arrow = "⬆️" if trend == "UP" else ("⬇️" if trend == "DOWN" else "➡️")
-    price_str = escape_markdown(f"{price:.5f}")
 
     ema21 = result.get("ema21", 0)
-    pip_str = escape_markdown(f"{(price - ema21) * 10000:+.1f} pip dari EMA21") if ema21 > 0 else ""
-
-    safe_name = escape_markdown(name)
-    safe_session = escape_markdown(session)
-    safe_candle = escape_markdown(candle.replace('_',' ').title())
+    pip_str = f"{(price - ema21) * 10000:+.1f} pip dari EMA21" if ema21 > 0 else ""
 
     lines = [
-        f"📊 *{safe_name} LIVE UPDATE*",
-        f"⏰ {now_local} {TIMEZONE_LABEL} | {safe_session}",
+        f"📊 <b>{html_escape(name)} LIVE UPDATE</b>",
+        f"⏰ {now_local} {TIMEZONE_LABEL} | {html_escape(session)}",
         "━━━━━━━━━━━━━━━━━━",
-        f"{sig_e} *Harga:* `{price_str}` {t_arrow}",
+        f"{sig_e} <b>Harga:</b> <code>{price:.5f}</code> {t_arrow}",
         f"📏 {pip_str}",
         "",
-        f"📉 RSI\\(14\\): {rsi_e} `{rsi}`",
-        f"📊 ADX\\(14\\): `{adx}`",
-        f"📦 Volume: `{vol}x`",
-        f"🕯 Pattern: `{safe_candle}`",
-        f"🎯 Skor: `{score}/8`",
+        f"📉 RSI(14): {rsi_e} <code>{rsi}</code>",
+        f"📊 ADX(14): <code>{adx}</code>",
+        f"📦 Volume: <code>{vol}x</code>",
+        f"🕯 Pattern: <code>{html_escape(candle.replace('_',' ').title())}</code>",
+        f"🎯 Skor: <code>{score}/8</code>",
         "━━━━━━━━━━━━━━━━━━",
     ]
 
     if sig in ("CALL", "PUT"):
-        lines.append(f"🚨 *SINYAL {sig} TERKIRIM\\!*")
+        lines.append(f"🚨 <b>SINYAL {sig} TERKIRIM!</b>")
     else:
         reason = result.get("reasons", [""])[0] if result.get("reasons") else "Menunggu..."
-        lines.append(f"⏳ {escape_markdown(reason)}")
+        lines.append(f"⏳ {html_escape(reason)}")
 
-    lines += ["", f"🕐 Jam terbaik: 21:00\\-00:00 {TIMEZONE_LABEL}", "_@Aswadd\\_bot Multi\\-Asset Final v2_"]
+    lines += ["", f"🕐 Jam terbaik: 21:00-00:00 {TIMEZONE_LABEL}", "<i>@Aswadd_bot Multi-Asset Final v2</i>"]
     return "\n".join(lines)
 
 # ==================== BACKTEST ====================
@@ -777,7 +758,7 @@ def run_backtest():
 def process_signal_with_delay(b, symbol, name, result):
     try:
         warning_msg = format_early_warning(name, symbol, result)
-        b.send_message(CHAT_ID, warning_msg, parse_mode="MarkdownV2")
+        b.send_message(CHAT_ID, warning_msg, parse_mode="HTML")
         pending_signals[symbol] = result
 
         time.sleep(EARLY_WARNING_SECONDS)
@@ -785,12 +766,12 @@ def process_signal_with_delay(b, symbol, name, result):
         recheck = analyze(symbol)
         if not recheck or recheck.get("signal") != result["signal"]:
             cancel_msg = format_cancelled(name, symbol, "Kondisi berubah setelah re-validasi")
-            b.send_message(CHAT_ID, cancel_msg, parse_mode="MarkdownV2")
+            b.send_message(CHAT_ID, cancel_msg, parse_mode="HTML")
             pending_signals.pop(symbol, None)
             return
 
         alert_msg = format_signal_alert(name, symbol, recheck)
-        b.send_message(CHAT_ID, alert_msg, parse_mode="MarkdownV2")
+        b.send_message(CHAT_ID, alert_msg, parse_mode="HTML")
         set_cooldown(symbol)
         pending_signals.pop(symbol, None)
 
@@ -831,7 +812,7 @@ def scan_loop():
                 else:
                     update = format_market_update(symbol, result)
                     try:
-                        b.send_message(CHAT_ID, update, parse_mode="MarkdownV2")
+                        b.send_message(CHAT_ID, update, parse_mode="HTML")
                     except Exception as e:
                         print(f"[SEND ERROR] {symbol}: {e}")
 
