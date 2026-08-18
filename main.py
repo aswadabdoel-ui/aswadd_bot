@@ -62,7 +62,7 @@ def setup_handlers(b):
     def cmd_start(message):
         asset_list = "\n".join([f"  • {html_escape(v)}" for v in ASSETS.values()])
         b.reply_to(message,
-            f"🤖 <b>Aswadd Bot Multi-Asset Final v3.1</b>\n\n"
+            f"🤖 <b>Aswadd Bot Multi-Asset Final v3.2</b>\n\n"
             f"🔕 <b>MODE SENYAP AKTIF</b>\n"
             f"Bot hanya kirim notifikasi saat ada sinyal:\n"
             f"  🔔 Early Warning (persiapan)\n"
@@ -88,7 +88,7 @@ def setup_handlers(b):
             f"<b>Jam Terbaik:</b> 21:00-00:00 {TIMEZONE_LABEL}\n"
             f"(London+NY Overlap)\n\n"
             f"⚠️ <i>Data: Yahoo Finance (delay ~15-30 detik)</i>\n\n"
-            f"/status /score /backtest",
+            f"/status /score /backtest /scan",
             parse_mode="HTML")
 
     @b.message_handler(commands=["status"])
@@ -98,7 +98,7 @@ def setup_handlers(b):
         session = get_session_name(hour)
         active_assets = [v for k, v in ASSETS.items()]
         b.reply_to(message,
-            f"✅ <b>Bot Aktif — Mode Senyap v3.1</b>\n"
+            f"✅ <b>Bot Aktif — Mode Senyap v3.2</b>\n"
             f"Aset: {html_escape(', '.join(active_assets))}\n"
             f"Min skor: {MIN_SCORE_BASE}/8\n"
             f"Expiry: {EXPIRY_MINUTES}m (fixed)\n"
@@ -107,7 +107,8 @@ def setup_handlers(b):
             f"Pending confirm: {len(pending_signals)}\n"
             f"Sesi sekarang: {html_escape(session)}\n"
             f"Update tiap {TIMEFRAME_MINUTES} menit\n\n"
-            f"🔕 <i>Tidak ada market update rutin.\nNotifikasi hanya saat sinyal muncul.</i>",
+            f"🔕 <i>Tidak ada market update rutin.\nNotifikasi hanya saat sinyal muncul.</i>\n\n"
+            f"💡 <i>Gunakan /scan untuk cek kondisi market manual anytime.</i>",
             parse_mode="HTML")
 
     @b.message_handler(commands=["score"])
@@ -122,6 +123,27 @@ def setup_handlers(b):
         lines.append(f"\n⏳ Pending: {len(pending_signals)}")
         b.reply_to(message, "\n".join(lines), parse_mode="HTML")
 
+    @b.message_handler(commands=["scan"])
+    def cmd_scan(message):
+        b.reply_to(message, "🔍 <i>Menjalankan scan manual...</i>", parse_mode="HTML")
+        results = []
+        for symbol, name in ASSETS.items():
+            result = analyze(symbol)
+            if result:
+                sig = result.get("signal", "WAIT")
+                score = result.get("score", 0)
+                raw = result.get("raw_score", 0)
+                reason = result.get("reasons", [""])[0] if result.get("reasons") else ""
+                emoji_sig = "🟢" if sig == "CALL" else ("🔴" if sig == "PUT" else "⏳")
+                results.append(
+                    f"{emoji_sig} <b>{html_escape(name)}</b>: {score}/8 (raw {raw}/7)\n"
+                    f"   <i>{html_escape(reason[:50])}</i>"
+                )
+        if not results:
+            results.append("<i>Data tidak tersedia</i>")
+        msg = "📊 <b>HASIL SCAN MANUAL</b>\n━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(results)
+        b.reply_to(message, msg, parse_mode="HTML")
+
     @b.message_handler(commands=["backtest"])
     def cmd_backtest(message):
         b.reply_to(message, "⏳ <i>Menjalankan backtest 7 hari terakhir...</i>", parse_mode="HTML")
@@ -135,7 +157,7 @@ def setup_handlers(b):
             f"Win Rate: {result['win_rate']:.1f}%\n"
             f"Rata-rata/hari: {result['avg_per_day']:.1f} sinyal\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"<i>Simulasi expiry 5m, asumsi win jika harga bergerak searah ≥ 0.5x ATR</i>"
+            f"<i>Simulasi expiry 5m, filter diperlonggar untuk backtest\n(ADX≥18, Vol≥1.1x, pattern opsional)</i>"
         )
         b.reply_to(message, msg, parse_mode="HTML")
 
@@ -629,7 +651,7 @@ def format_signal_alert(name, symbol, result):
 # ==================== FORMAT: CANCELLED (BERDERING) ====================
 def format_cancelled(name, symbol, reason):
     lines = [
-        f"⚠️️ <b>SINYAL DIBATALKAN — {html_escape(name)}</b>",
+        f"⚠️ <b>SINYAL DIBATALKAN — {html_escape(name)}</b>",
         f"📊 <code>{html_escape(symbol)}</code>",
         "━━━━━━━━━━━━━━━━━━━",
         f"❌ Alasan: {html_escape(reason)}",
@@ -638,7 +660,7 @@ def format_cancelled(name, symbol, reason):
     ]
     return "\n".join(lines)
 
-# ==================== BACKTEST ====================
+# ==================== BACKTEST (FILTER DIPERLONGGAR) ====================
 def run_backtest():
     total_signals = 0
     wins = 0
@@ -674,12 +696,8 @@ def run_backtest():
 
             adx_val, _, _ = calc_adx(window_highs, window_lows, window_closes)
             vol_ratio = calc_volume_ratio(window_volumes)
-            candle_pat = detect_candle_pattern(window_opens, window_highs, window_lows, window_closes)
 
-            if adx_val < 22 or vol_ratio < 1.3:
-                continue
-            valid_patterns = ("bullish_engulfing", "bearish_engulfing", "hammer", "shooting_star")
-            if candle_pat not in valid_patterns:
+            if adx_val < 18 or vol_ratio < 1.1:
                 continue
 
             atr = calc_atr(window_highs, window_lows, window_closes)
@@ -687,9 +705,9 @@ def run_backtest():
             next_price = closes[i+1]
 
             total_signals += 1
-            if golden_cross and next_price > entry_price + 0.5 * atr:
+            if golden_cross and next_price > entry_price:
                 wins += 1
-            elif death_cross and next_price < entry_price - 0.5 * atr:
+            elif death_cross and next_price < entry_price:
                 wins += 1
             else:
                 losses += 1
@@ -778,7 +796,7 @@ def scan_loop():
 # ==================== FLASK ROUTE ====================
 @app.route("/")
 def index():
-    return "Aswadd Bot Multi-Asset Final v3.1 is running!"
+    return "Aswadd Bot Multi-Asset Final v3.2 is running!"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
