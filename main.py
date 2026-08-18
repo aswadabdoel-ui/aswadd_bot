@@ -62,7 +62,7 @@ def setup_handlers(b):
     def cmd_start(message):
         asset_list = "\n".join([f"  • {html_escape(v)}" for v in ASSETS.values()])
         b.reply_to(message,
-            f"🤖 <b>Aswadd Bot Multi-Asset Final v3</b>\n\n"
+            f"🤖 <b>Aswadd Bot Multi-Asset Final v3.1</b>\n\n"
             f"🔕 <b>MODE SENYAP AKTIF</b>\n"
             f"Bot hanya kirim notifikasi saat ada sinyal:\n"
             f"  🔔 Early Warning (persiapan)\n"
@@ -98,7 +98,7 @@ def setup_handlers(b):
         session = get_session_name(hour)
         active_assets = [v for k, v in ASSETS.items()]
         b.reply_to(message,
-            f"✅ <b>Bot Aktif — Mode Senyap</b>\n"
+            f"✅ <b>Bot Aktif — Mode Senyap v3.1</b>\n"
             f"Aset: {html_escape(', '.join(active_assets))}\n"
             f"Min skor: {MIN_SCORE_BASE}/8\n"
             f"Expiry: {EXPIRY_MINUTES}m (fixed)\n"
@@ -629,7 +629,7 @@ def format_signal_alert(name, symbol, result):
 # ==================== FORMAT: CANCELLED (BERDERING) ====================
 def format_cancelled(name, symbol, reason):
     lines = [
-        f"⚠️⚠️ <b>SINYAL DIBATALKAN — {html_escape(name)}</b>",
+        f"⚠️️ <b>SINYAL DIBATALKAN — {html_escape(name)}</b>",
         f"📊 <code>{html_escape(symbol)}</code>",
         "━━━━━━━━━━━━━━━━━━━",
         f"❌ Alasan: {html_escape(reason)}",
@@ -709,19 +709,24 @@ def run_backtest():
 # ==================== MAIN LOOP ====================
 def process_signal_with_delay(b, symbol, name, result):
     try:
+        print(f"[SIGNAL START] {symbol} {result['signal']} score={result['score']}")
+
         warning_msg = format_early_warning(name, symbol, result)
         b.send_message(CHAT_ID, warning_msg, parse_mode="HTML")
-        pending_signals[symbol] = result
+        print(f"[WARNING SENT] {symbol}")
 
+        pending_signals[symbol] = result
         time.sleep(EARLY_WARNING_SECONDS)
 
         recheck = analyze(symbol)
         if not recheck or recheck.get("signal") != result["signal"]:
+            print(f"[RECHECK FAILED] {symbol} - cancelled")
             cancel_msg = format_cancelled(name, symbol, "Kondisi berubah setelah re-validasi")
             b.send_message(CHAT_ID, cancel_msg, parse_mode="HTML")
             pending_signals.pop(symbol, None)
             return
 
+        print(f"[RECHECK PASSED] {symbol} - sending entry")
         alert_msg = format_signal_alert(name, symbol, recheck)
         b.send_message(CHAT_ID, alert_msg, parse_mode="HTML")
         set_cooldown(symbol)
@@ -755,12 +760,15 @@ def scan_loop():
                 if not result:
                     continue
 
-                last_signal_scores[symbol] = f"{result.get('score', 0)}/8 (raw {result.get('raw_score', 0)}/7)"
-
                 sig = result.get("signal", "WAIT")
+
                 if sig in ("CALL", "PUT"):
+                    last_signal_scores[symbol] = f"{result.get('score', 0)}/8 (raw {result.get('raw_score', 0)}/7) ✅ SIGNAL"
                     t = threading.Thread(target=process_signal_with_delay, args=(b, symbol, name, result), daemon=True)
                     t.start()
+                else:
+                    reason = result.get('reasons', [''])[0] if result.get('reasons') else 'WAIT'
+                    last_signal_scores[symbol] = f"{result.get('score', 0)}/8 (raw {result.get('raw_score', 0)}/7) ❌ {reason[:30]}"
 
         except Exception as e:
             print(f"[SCAN ERROR] {e}")
@@ -770,7 +778,7 @@ def scan_loop():
 # ==================== FLASK ROUTE ====================
 @app.route("/")
 def index():
-    return "Aswadd Bot Multi-Asset Final v3 is running!"
+    return "Aswadd Bot Multi-Asset Final v3.1 is running!"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
