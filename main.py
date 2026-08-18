@@ -62,7 +62,7 @@ def setup_handlers(b):
     def cmd_start(message):
         asset_list = "\n".join([f"  • {html_escape(v)}" for v in ASSETS.values()])
         b.reply_to(message,
-            f"🤖 <b>Aswadd Bot Multi-Asset Final v3.2</b>\n\n"
+            f"🤖 <b>Aswadd Bot Multi-Asset Final v3.3</b>\n\n"
             f"🔕 <b>MODE SENYAP AKTIF</b>\n"
             f"Bot hanya kirim notifikasi saat ada sinyal:\n"
             f"  🔔 Early Warning (persiapan)\n"
@@ -88,7 +88,7 @@ def setup_handlers(b):
             f"<b>Jam Terbaik:</b> 21:00-00:00 {TIMEZONE_LABEL}\n"
             f"(London+NY Overlap)\n\n"
             f"⚠️ <i>Data: Yahoo Finance (delay ~15-30 detik)</i>\n\n"
-            f"/status /score /backtest /scan",
+            f"/status /score /backtest /scan /debug",
             parse_mode="HTML")
 
     @b.message_handler(commands=["status"])
@@ -98,7 +98,7 @@ def setup_handlers(b):
         session = get_session_name(hour)
         active_assets = [v for k, v in ASSETS.items()]
         b.reply_to(message,
-            f"✅ <b>Bot Aktif — Mode Senyap v3.2</b>\n"
+            f"✅ <b>Bot Aktif — Mode Senyap v3.3</b>\n"
             f"Aset: {html_escape(', '.join(active_assets))}\n"
             f"Min skor: {MIN_SCORE_BASE}/8\n"
             f"Expiry: {EXPIRY_MINUTES}m (fixed)\n"
@@ -108,7 +108,7 @@ def setup_handlers(b):
             f"Sesi sekarang: {html_escape(session)}\n"
             f"Update tiap {TIMEFRAME_MINUTES} menit\n\n"
             f"🔕 <i>Tidak ada market update rutin.\nNotifikasi hanya saat sinyal muncul.</i>\n\n"
-            f"💡 <i>Gunakan /scan untuk cek kondisi market manual anytime.</i>",
+            f"💡 <i>Gunakan /scan untuk cek kondisi market manual anytime.\nGunakan /debug untuk diagnosa backtest.</i>",
             parse_mode="HTML")
 
     @b.message_handler(commands=["score"])
@@ -160,6 +160,79 @@ def setup_handlers(b):
             f"<i>Simulasi expiry 5m, filter diperlonggar untuk backtest\n(ADX≥18, Vol≥1.1x, pattern opsional)</i>"
         )
         b.reply_to(message, msg, parse_mode="HTML")
+
+    @b.message_handler(commands=["debug"])
+    def cmd_debug(message):
+        b.reply_to(message, "🔧 <i>Menjalankan diagnosa...</i>", parse_mode="HTML")
+        lines = ["🔧 <b>DIAGNOSA BACKTEST</b>", "━━━━━━━━━━━━━━━━━━"]
+        
+        for symbol, name in ASSETS.items():
+            closes, highs, lows, opens, volumes = fetch_prices(symbol, days=7)
+            
+            if not closes:
+                lines.append(f"\n❌ <b>{html_escape(name)}</b>: Data gagal diambil")
+                continue
+            
+            lines.append(f"\n📊 <b>{html_escape(name)}</b> ({html_escape(symbol)})")
+            lines.append(f"   Candle didapat: {len(closes)}")
+            
+            if len(closes) < 200:
+                lines.append(f"   ⚠️ Kurang dari 200 candle → backtest skip")
+                lines.append(f"   Harga terakhir: {closes[-1]:.5f}")
+                continue
+            
+            cross_count = 0
+            adx_pass = 0
+            vol_pass = 0
+            both_pass = 0
+            
+            for i in range(100, len(closes) - 1):
+                window_closes = closes[:i+1]
+                window_highs = highs[:i+1]
+                window_lows = lows[:i+1]
+                window_volumes = volumes[:i+1]
+                
+                ema9_s = calc_ema_series(window_closes, 9)
+                ema21_s = calc_ema_series(window_closes, 21)
+                if len(ema9_s) < 3 or len(ema21_s) < 3:
+                    continue
+                
+                prev_diff = ema9_s[-3] - ema21_s[-3]
+                curr_diff = ema9_s[-1] - ema21_s[-1]
+                golden_cross = prev_diff <= 0 and curr_diff > 0
+                death_cross = prev_diff >= 0 and curr_diff < 0
+                
+                if golden_cross or death_cross:
+                    cross_count += 1
+                    
+                    adx_val, _, _ = calc_adx(window_highs, window_lows, window_closes)
+                    vol_ratio = calc_volume_ratio(window_volumes)
+                    
+                    if adx_val >= 18:
+                        adx_pass += 1
+                    if vol_ratio >= 1.1:
+                        vol_pass += 1
+                    if adx_val >= 18 and vol_ratio >= 1.1:
+                        both_pass += 1
+            
+            lines.append(f"   EMA Cross terdeteksi: {cross_count}")
+            lines.append(f"   Lolos ADX≥18: {adx_pass}")
+            lines.append(f"   Lolos Vol≥1.1x: {vol_pass}")
+            lines.append(f"   Lolos keduanya: {both_pass}")
+            lines.append(f"   Harga terakhir: {closes[-1]:.5f}")
+            
+            if len(closes) > 0:
+                adx_now, _, _ = calc_adx(highs, lows, closes)
+                vol_now = calc_volume_ratio(volumes)
+                lines.append(f"   ADX sekarang: {adx_now}")
+                lines.append(f"   Vol sekarang: {vol_now}x")
+        
+        lines.append("\n━━━━━━━━━━━━━━━━━━")
+        lines.append("<i>Jika 'Candle didapat' < 200 → masalah data Yahoo</i>")
+        lines.append("<i>Jika 'EMA Cross' = 0 → market sideways 7 hari</i>")
+        lines.append("<i>Jika 'Lolos keduanya' = 0 → filter masih terlalu ketat</i>")
+        
+        b.reply_to(message, "\n".join(lines), parse_mode="HTML")
 
 # ==================== SESSION DETECTION ====================
 def get_session_name(hour_utc):
@@ -571,7 +644,7 @@ def format_early_warning(name, symbol, result):
     entry_instruction = "🟢 PERSIAPAN BELI NAIK (CALL)" if sig == "CALL" else "🔴 PERSIAPAN BELI TURUN (PUT)"
 
     lines = [
-        f"🔔🔔⏰ {emoji} <b>EARLY WARNING — {html_escape(name)}</b>",
+        f"🔔🔔 {emoji} <b>EARLY WARNING — {html_escape(name)}</b>",
         f"📊 <code>{html_escape(symbol)}</code> | TF: {TIMEFRAME_MINUTES}m | Expiry: {EXPIRY_MINUTES}m",
         "━━━━━━━━━━━━━━━━━━━",
         entry_instruction,
@@ -796,7 +869,7 @@ def scan_loop():
 # ==================== FLASK ROUTE ====================
 @app.route("/")
 def index():
-    return "Aswadd Bot Multi-Asset Final v3.2 is running!"
+    return "Aswadd Bot Multi-Asset Final v3.3 is running!"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
