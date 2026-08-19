@@ -62,7 +62,7 @@ def setup_handlers(b):
     def cmd_start(message):
         asset_list = "\n".join([f"  • {html_escape(v)}" for v in ASSETS.values()])
         b.reply_to(message,
-            f"🤖 <b>Aswadd Bot Multi-Asset Final v3.4</b>\n\n"
+            f"🤖 <b>Aswadd Bot Multi-Asset Final v3.5</b>\n\n"
             f"🔕 <b>MODE SENYAP AKTIF</b>\n"
             f"Bot hanya kirim notifikasi saat ada sinyal:\n"
             f"  🔔 Early Warning (persiapan)\n"
@@ -80,8 +80,8 @@ def setup_handlers(b):
             f"• RSI(14) Zone 35-65\n"
             f"• MACD(8,17,9)\n"
             f"• Bollinger Bands(20,2)\n"
-            f"• ADX(14) ≥ 22\n"
-            f"• Volume Spike ≥ 1.3x\n"
+            f"• ADX(14) &gt;= 22\n"
+            f"• Volume Spike &gt;= 1.3x\n"
             f"• Candlestick Pattern WAJIB\n"
             f"• Wick Filter (max 70% body)\n"
             f"• ATR Filter + News Hours Block\n\n"
@@ -98,7 +98,7 @@ def setup_handlers(b):
         session = get_session_name(hour)
         active_assets = [v for k, v in ASSETS.items()]
         b.reply_to(message,
-            f"✅ <b>Bot Aktif — Mode Senyap v3.4</b>\n"
+            f"✅ <b>Bot Aktif — Mode Senyap v3.5</b>\n"
             f"Aset: {html_escape(', '.join(active_assets))}\n"
             f"Min skor: {MIN_SCORE_BASE}/8\n"
             f"Expiry: {EXPIRY_MINUTES}m (fixed)\n"
@@ -164,7 +164,7 @@ def setup_handlers(b):
                 f"Win Rate: {result['win_rate']:.1f}%\n"
                 f"Rata-rata/hari: {result['avg_per_day']:.1f} sinyal\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"<i>Simulasi expiry 5m, filter diperlonggar untuk backtest\n(ADX≥18, Vol≥1.1x, pattern opsional)</i>"
+                f"<i>Simulasi expiry 5m, filter diperlonggar untuk backtest\n(ADX&gt;=15, Vol&gt;=0.9x, pattern opsional)</i>"
             )
             b.reply_to(message, msg, parse_mode="HTML")
         except Exception as e:
@@ -188,7 +188,7 @@ def setup_handlers(b):
                 lines.append(f"   Harga terakhir: {closes[-1]:.5f}")
                 
                 if len(closes) < 200:
-                    lines.append(f"   ⚠️ Kurang dari 200 candle → backtest skip")
+                    lines.append(f"   ⚠️ Kurang dari 200 candle - backtest skip")
                     adx_now, _, _ = calc_adx(highs, lows, closes)
                     vol_now = calc_volume_ratio(volumes)
                     lines.append(f"   ADX sekarang: {adx_now} | Vol: {vol_now}x")
@@ -218,11 +218,11 @@ def setup_handlers(b):
                         cross_count += 1
                         adx_val, _, _ = calc_adx(window_highs, window_lows, window_closes)
                         vol_ratio = calc_volume_ratio(window_volumes)
-                        if adx_val >= 18 and vol_ratio >= 1.1:
+                        if adx_val >= 15 and vol_ratio >= 0.9:
                             both_pass += 1
                 
                 lines.append(f"   EMA Cross (sample 200): {cross_count}")
-                lines.append(f"   Lolos filter (ADX≥18 + Vol≥1.1x): {both_pass}")
+                lines.append(f"   Lolos filter (ADX&gt;=15 + Vol&gt;=0.9x): {both_pass}")
                 
                 adx_now, _, _ = calc_adx(highs, lows, closes)
                 vol_now = calc_volume_ratio(volumes)
@@ -233,14 +233,18 @@ def setup_handlers(b):
         
         lines.append("\n━━━━━━━━━━━━━━━━━━")
         lines.append("<i>Diagnosa ringan: 3 hari data, sample 200 candle</i>")
-        lines.append("<i>Jika 'Candle didapat' < 200 → masalah data Yahoo</i>")
-        lines.append("<i>Jika 'EMA Cross' = 0 → market sideways</i>")
-        lines.append("<i>Jika 'Lolos filter' = 0 → filter terlalu ketat</i>")
+        lines.append("<i>Jika 'Candle didapat' kurang dari 200 - masalah data Yahoo</i>")
+        lines.append("<i>Jika 'EMA Cross' = 0 - market sideways</i>")
+        lines.append("<i>Jika 'Lolos filter' = 0 - filter terlalu ketat</i>")
         
         try:
             b.reply_to(message, "\n".join(lines), parse_mode="HTML")
         except Exception as e:
             print(f"[DEBUG SEND ERROR] {e}")
+            try:
+                b.reply_to(message, "❌ <i>Error kirim hasil debug. Cek log Railway.</i>", parse_mode="HTML")
+            except:
+                pass
 
 # ==================== SESSION DETECTION ====================
 def get_session_name(hour_utc):
@@ -265,29 +269,45 @@ def is_active_session(hour_utc):
 def is_news_hour(hour_utc):
     return hour_utc in HIGH_IMPACT_NEWS_HOURS_UTC
 
-# ==================== DATA FETCHING ====================
+# ==================== DATA FETCHING (DENGAN RETRY) ====================
 def fetch_prices(symbol, days=3):
-    try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-        params = {"range": f"{days}d", "interval": "5m"}
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        r = requests.get(url, params=params, headers=headers, timeout=15)
-        data = r.json()
-        result = data["chart"]["result"][0]
-        quotes = result["indicators"]["quote"][0]
-        closes  = [c for c in quotes["close"] if c is not None]
-        highs   = [h for h in quotes["high"]  if h is not None]
-        lows    = [l for l in quotes["low"]   if l is not None]
-        opens   = [o for o in quotes["open"]  if o is not None]
-        volumes = [v for v in quotes.get("volume", []) if v is not None]
-        min_len = min(len(closes), len(highs), len(lows), len(opens), len(volumes))
-        if min_len < 80:
-            return None, None, None, None, None
-        return (closes[-min_len:], highs[-min_len:], lows[-min_len:],
-                opens[-min_len:], volumes[-min_len:])
-    except Exception as e:
-        print(f"[FETCH ERROR] {symbol}: {e}")
-        return None, None, None, None, None
+    headers_list = [
+        {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
+        {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"},
+        {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"},
+    ]
+    
+    for attempt in range(3):
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+            params = {"range": f"{days}d", "interval": "5m"}
+            headers = headers_list[attempt % len(headers_list)]
+            r = requests.get(url, params=params, headers=headers, timeout=15)
+            
+            if r.status_code != 200:
+                print(f"[FETCH RETRY {attempt+1}] {symbol}: HTTP {r.status_code}")
+                time.sleep(2)
+                continue
+            
+            data = r.json()
+            result = data["chart"]["result"][0]
+            quotes = result["indicators"]["quote"][0]
+            closes  = [c for c in quotes["close"] if c is not None]
+            highs   = [h for h in quotes["high"]  if h is not None]
+            lows    = [l for l in quotes["low"]   if l is not None]
+            opens   = [o for o in quotes["open"]  if o is not None]
+            volumes = [v for v in quotes.get("volume", []) if v is not None]
+            min_len = min(len(closes), len(highs), len(lows), len(opens), len(volumes))
+            if min_len < 80:
+                return None, None, None, None, None
+            return (closes[-min_len:], highs[-min_len:], lows[-min_len:],
+                    opens[-min_len:], volumes[-min_len:])
+        except Exception as e:
+            print(f"[FETCH RETRY {attempt+1}] {symbol}: {e}")
+            time.sleep(2)
+    
+    print(f"[FETCH FAILED] {symbol}: All 3 attempts failed")
+    return None, None, None, None, None
 
 # ==================== INDIKATOR ====================
 def calc_ema(data, period):
@@ -435,7 +455,7 @@ def check_wick_filter(opens, highs, lows, closes):
         return True, "range=0"
     wick_ratio = (total_range - body) / total_range
     if wick_ratio > 0.7:
-        return False, f"Wick {wick_ratio:.0%} > 70% (indecision)"
+        return False, f"Wick {wick_ratio:.0%} lebih dari 70% (indecision)"
     return True, f"Wick {wick_ratio:.0%} OK"
 
 # ==================== ANTI-NOISE: ATR FILTER ====================
@@ -536,10 +556,10 @@ def analyze(symbol):
 
     if golden_cross and price > ema55:
         score += 1.0
-        reasons.append("> EMA55 (+1.0)")
+        reasons.append("Lebih dari EMA55 (+1.0)")
     elif death_cross and price < ema55:
         score += 1.0
-        reasons.append("< EMA55 (+1.0)")
+        reasons.append("Kurang dari EMA55 (+1.0)")
 
     if 35 <= rsi <= 65:
         score += 1.0
@@ -587,13 +607,13 @@ def analyze(symbol):
         if adx_val < 22:
             basic["signal"] = "WAIT"
             basic["filtered"] = True
-            basic["reasons"] = [f"ADX {adx_val} < 22 (terlalu lemah untuk 1 candle)"]
+            basic["reasons"] = [f"ADX {adx_val} kurang dari 22 (terlalu lemah untuk 1 candle)"]
             return basic
 
         if vol_ratio < 1.3:
             basic["signal"] = "WAIT"
             basic["filtered"] = True
-            basic["reasons"] = [f"Volume {vol_ratio}x < 1.3x (momentum kurang)"]
+            basic["reasons"] = [f"Volume {vol_ratio}x kurang dari 1.3x (momentum kurang)"]
             return basic
 
         valid_patterns = ("bullish_engulfing", "bearish_engulfing", "hammer", "shooting_star")
@@ -609,7 +629,7 @@ def analyze(symbol):
 
     if score_norm < effective_min_score:
         basic["signal"] = "WAIT"
-        basic["reasons"] = [f"Skor {score_norm}/8 < {effective_min_score} (filter ketat)"]
+        basic["reasons"] = [f"Skor {score_norm}/8 kurang dari {effective_min_score} (filter ketat)"]
         return basic
 
     if direction == "CALL":
@@ -652,11 +672,11 @@ def format_early_warning(name, symbol, result):
     entry_instruction = "🟢 PERSIAPAN BELI NAIK (CALL)" if sig == "CALL" else "🔴 PERSIAPAN BELI TURUN (PUT)"
 
     lines = [
-        f"🔔🔔 {emoji} <b>EARLY WARNING — {html_escape(name)}</b>",
+        f"🔔 {emoji} <b>EARLY WARNING - {html_escape(name)}</b>",
         f"📊 <code>{html_escape(symbol)}</code> | TF: {TIMEFRAME_MINUTES}m | Expiry: {EXPIRY_MINUTES}m",
         "━━━━━━━━━━━━━━━━━━━",
         entry_instruction,
-        f"⏳ <b>Entry dalam {EARLY_WARNING_SECONDS // 60} menit — siapkan platform!</b>",
+        f"⏳ <b>Entry dalam {EARLY_WARNING_SECONDS // 60} menit - siapkan platform!</b>",
         "━━━━━━━━━━━━━━━━━━━",
         f"<b>Skor: {score}/8</b> (raw {raw}/7) {score_bar}",
         f"🕐 {html_escape(session)}",
@@ -705,11 +725,11 @@ def format_signal_alert(name, symbol, result):
     entry_instruction = "🟢 LANGSUNG BELI NAIK (CALL)" if sig == "CALL" else "🔴 LANGSUNG BELI TURUN (PUT)"
 
     lines = [
-        f"🚨 {emoji} <b>{sig} SIGNAL — {html_escape(name)}</b>",
+        f"🚨 {emoji} <b>{sig} SIGNAL - {html_escape(name)}</b>",
         f"📊 <code>{html_escape(symbol)}</code> | TF: {TIMEFRAME_MINUTES}m | Expiry: {EXPIRY_MINUTES}m",
         "━━━━━━━━━━━━━━━━━━━",
         entry_instruction,
-        f"⚡ <b>ENTRY SEKARANG — JANGAN TUNDA!</b>",
+        f"⚡ <b>ENTRY SEKARANG - JANGAN TUNDA!</b>",
         f"🎯 <b>Expiry: {EXPIRY_MINUTES} Menit (MAX PLATFORM)</b>",
         "━━━━━━━━━━━━━━━━━━━",
         f"<b>Skor: {score}/8</b> (raw {raw}/7) {score_bar}",
@@ -721,8 +741,8 @@ def format_signal_alert(name, symbol, result):
         f"🛑 SL: <code>{result.get('sl', 'N/A')}</code>",
         f"📈 RR: 1:1.67",
         "━━━━━━━━━━━━━━━━━━━",
-        "✅ <i>Re-validasi lolos — kondisi masih valid</i>",
-        "ℹ️ <i>Filter: ADX≥22, Vol≥1.3x, Pattern wajib, Wick OK</i>",
+        "✅ <i>Re-validasi lolos - kondisi masih valid</i>",
+        "ℹ️ <i>Filter: ADX lebih dari 22, Vol lebih dari 1.3x, Pattern wajib, Wick OK</i>",
         "━━━━━━━━━━━━━━━━━━━",
         "💰 <i>Stake: 1-2% saldo</i>",
         "🛑 <i>Max loss/hari: 5% saldo</i>",
@@ -732,12 +752,12 @@ def format_signal_alert(name, symbol, result):
 # ==================== FORMAT: CANCELLED (BERDERING) ====================
 def format_cancelled(name, symbol, reason):
     lines = [
-        f"⚠️ <b>SINYAL DIBATALKAN — {html_escape(name)}</b>",
+        f"⚠️ <b>SINYAL DIBATALKAN - {html_escape(name)}</b>",
         f"📊 <code>{html_escape(symbol)}</code>",
         "━━━━━━━━━━━━━━━━━━━",
         f"❌ Alasan: {html_escape(reason)}",
         "━━━━━━━━━━━━━━━━━━━",
-        "<i>Jangan entry — tunggu sinyal berikutnya</i>",
+        "<i>Jangan entry - tunggu sinyal berikutnya</i>",
     ]
     return "\n".join(lines)
 
@@ -778,7 +798,7 @@ def run_backtest():
             adx_val, _, _ = calc_adx(window_highs, window_lows, window_closes)
             vol_ratio = calc_volume_ratio(window_volumes)
 
-            if adx_val < 18 or vol_ratio < 1.1:
+            if adx_val < 15 or vol_ratio < 0.9:
                 continue
 
             atr = calc_atr(window_highs, window_lows, window_closes)
@@ -877,7 +897,7 @@ def scan_loop():
 # ==================== FLASK ROUTE ====================
 @app.route("/")
 def index():
-    return "Aswadd Bot Multi-Asset Final v3.4 is running!"
+    return "Aswadd Bot Multi-Asset Final v3.5 is running!"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
