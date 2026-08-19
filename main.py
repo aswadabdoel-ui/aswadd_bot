@@ -7,7 +7,7 @@ import requests
 from flask import Flask, request as flask_request
 import telebot
 
-# ==================== KONFIGURASI FINAL ====================
+# ==================== KONFIGURASI FINAL v3.5 ====================
 CHAT_ID        = os.environ.get("CHAT_ID", "971243017")
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "300"))
 COOLDOWN_MIN   = int(os.environ.get("COOLDOWN_MIN", "10"))
@@ -62,7 +62,7 @@ def setup_handlers(b):
     def cmd_start(message):
         asset_list = "\n".join([f"  • {html_escape(v)}" for v in ASSETS.values()])
         b.reply_to(message,
-            f"🤖 <b>Aswadd Bot Multi-Asset Final v3.6</b>\n\n"
+            f"🤖 <b>Aswadd Bot Multi-Asset Final v3.5</b>\n\n"
             f"🔕 <b>MODE SENYAP AKTIF</b>\n"
             f"Bot hanya kirim notifikasi saat ada sinyal:\n"
             f"  🔔 Early Warning (persiapan)\n"
@@ -73,16 +73,16 @@ def setup_handlers(b):
             f"• TF: {TIMEFRAME_MINUTES} Menit\n"
             f"• Expiry: {EXPIRY_MINUTES} Menit (MAX PLATFORM)\n"
             f"• Entry: 1 menit setelah warning + re-check\n"
-            f"• Min Score: {MIN_SCORE_BASE}/8 (diperketat)\n"
+            f"• Min Score: {MIN_SCORE_BASE}/8\n"
             f"• Cooldown: {COOLDOWN_MIN} menit/aset\n\n"
-            f"<b>Filter Ketat Expiry 5m:</b>\n"
+            f"<b>Filter v3.5:</b>\n"
             f"• EMA 9/21/55 + Cross\n"
             f"• RSI(14) Zone 35-65\n"
             f"• MACD(8,17,9)\n"
             f"• Bollinger Bands(20,2)\n"
-            f"• ADX(14) &gt;= 22\n"
-            f"• Volume Spike &gt;= 1.3x\n"
-            f"• Candlestick Pattern WAJIB\n"
+            f"• ADX(14) &gt;= 20\n"
+            f"• Volume Spike &gt;= 1.2x\n"
+            f"• Candlestick Pattern (Opsional/Penguat)\n"
             f"• Wick Filter (max 70% body)\n"
             f"• ATR Filter + News Hours Block\n\n"
             f"<b>Jam Terbaik:</b> 21:00-00:00 {TIMEZONE_LABEL}\n"
@@ -98,7 +98,7 @@ def setup_handlers(b):
         session = get_session_name(hour)
         active_assets = [v for k, v in ASSETS.items()]
         b.reply_to(message,
-            f"✅ <b>Bot Aktif - Mode Senyap v3.6</b>\n"
+            f"✅ <b>Bot Aktif - Mode Senyap v3.5</b>\n"
             f"Aset: {html_escape(', '.join(active_assets))}\n"
             f"Min skor: {MIN_SCORE_BASE}/8\n"
             f"Expiry: {EXPIRY_MINUTES}m (fixed)\n"
@@ -107,7 +107,7 @@ def setup_handlers(b):
             f"Pending confirm: {len(pending_signals)}\n"
             f"Sesi sekarang: {html_escape(session)}\n"
             f"Update tiap {TIMEFRAME_MINUTES} menit\n\n"
-            f"🔕 <i>Tidak ada market update rutin.\nNotifikasi hanya saat sinyal muncul.</i>\n\n"
+            f" <i>Tidak ada market update rutin.\nNotifikasi hanya saat sinyal muncul.</i>\n\n"
             f"💡 <i>/scan = cek market manual\n/debug = diagnosa backtest</i>",
             parse_mode="HTML")
 
@@ -164,7 +164,7 @@ def setup_handlers(b):
                 f"Win Rate: {result['win_rate']:.1f}%\n"
                 f"Rata-rata/hari: {result['avg_per_day']:.1f} sinyal\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"<i>Simulasi expiry 5m, filter diperlonggar untuk backtest\n(ADX&gt;=15, Vol&gt;=0.9x, pattern opsional)</i>"
+                f"<i>Simulasi expiry 5m, filter v3.5\n(ADX&gt;=15, Vol&gt;=0.9x, pattern opsional)</i>"
             )
             b.reply_to(message, msg, parse_mode="HTML")
         except Exception as e:
@@ -188,7 +188,7 @@ def setup_handlers(b):
                     lines.append(f"   Harga terakhir: {closes[-1]:.5f}")
                     
                     if len(closes) < 200:
-                        lines.append(f"   ⚠️ Kurang dari 200 candle - backtest skip")
+                        lines.append(f"   ️ Kurang dari 200 candle - backtest skip")
                         adx_now, _, _ = calc_adx(highs, lows, closes)
                         vol_now = calc_volume_ratio(volumes)
                         lines.append(f"   ADX sekarang: {adx_now} | Vol: {vol_now}x")
@@ -472,7 +472,7 @@ def check_atr_filter(highs, lows, closes):
         return False, f"Market chaos ({atr_ratio:.2f}x avg)"
     return True, f"ATR {atr_ratio:.2f}x normal"
 
-# ==================== ANALISIS 8-LAYER + FILTER KETAT ====================
+# ==================== ANALISIS 8-LAYER + FILTER v3.5 ====================
 def analyze(symbol):
     closes, highs, lows, opens, volumes = fetch_prices(symbol)
     if not closes or len(closes) < 80:
@@ -574,6 +574,7 @@ def analyze(symbol):
         score += 0.5
         reasons.append("Dalam BB (+0.5)")
 
+    # REVISI V3.5: ADX threshold dikembalikan ke 20
     if adx_val > 20:
         score += 1.0
         reasons.append(f"ADX {adx_val} kuat (+1.0)")
@@ -581,6 +582,7 @@ def analyze(symbol):
         score += 0.5
         reasons.append(f"ADX {adx_val} sedang (+0.5)")
 
+    # REVISI V3.5: Volume threshold dikembalikan ke 1.2x
     if vol_ratio > 1.2:
         score += 0.5
         reasons.append(f"Vol {vol_ratio}x (+0.5)")
@@ -588,6 +590,7 @@ def analyze(symbol):
         score += 0.25
         reasons.append(f"Vol {vol_ratio}x (+0.25)")
 
+    # REVISI V3.5: Pattern tetap memberi poin tapi tidak memblokir sinyal
     if golden_cross and candle_pat in ("bullish_engulfing", "hammer"):
         score += 0.5
         reasons.append(f"{candle_pat.replace('_',' ').title()} (+0.5)")
@@ -601,26 +604,24 @@ def analyze(symbol):
     basic["reasons"] = reasons
     basic["direction"] = direction
 
+    # REVISI V3.5: Filter ketat untuk expiry 5m (tanpa pattern wajib)
     if EXPIRY_MINUTES <= TIMEFRAME_MINUTES:
-        if adx_val < 22:
+        # ADX minimal 20 (bukan 22 seperti v3.6)
+        if adx_val < 20:
             basic["signal"] = "WAIT"
             basic["filtered"] = True
-            basic["reasons"] = [f"ADX {adx_val} kurang dari 22 (terlalu lemah untuk 1 candle)"]
+            basic["reasons"] = [f"ADX {adx_val} kurang dari 20 (terlalu lemah untuk 1 candle)"]
             return basic
 
-        if vol_ratio < 1.3:
+        # Volume minimal 1.2x (bukan 1.3x seperti v3.6)
+        if vol_ratio < 1.2:
             basic["signal"] = "WAIT"
             basic["filtered"] = True
-            basic["reasons"] = [f"Volume {vol_ratio}x kurang dari 1.3x (momentum kurang)"]
+            basic["reasons"] = [f"Volume {vol_ratio}x kurang dari 1.2x (momentum kurang)"]
             return basic
 
-        valid_patterns = ("bullish_engulfing", "bearish_engulfing", "hammer", "shooting_star")
-        if candle_pat not in valid_patterns:
-            basic["signal"] = "WAIT"
-            basic["filtered"] = True
-            basic["reasons"] = ["Tidak ada candle pattern konfirmasi (wajib expiry 5m)"]
-            return basic
-
+        # Pattern TIDAK WAJIB di v3.5, hanya penguat skor
+        
         effective_min_score = max(MIN_SCORE_BASE, 5.0)
     else:
         effective_min_score = MIN_SCORE_BASE
@@ -651,7 +652,7 @@ def set_cooldown(symbol):
 # ==================== FORMAT: EARLY WARNING (BERDERING) ====================
 def format_early_warning(name, symbol, result):
     sig = result["signal"]
-    emoji = "🟢" if sig == "CALL" else "🔴"
+    emoji = "" if sig == "CALL" else ""
     score = result["score"]
     raw = result.get("raw_score", 0)
     p = result["price"]
@@ -677,19 +678,19 @@ def format_early_warning(name, symbol, result):
         f"⏳ <b>Entry dalam {EARLY_WARNING_SECONDS // 60} menit - siapkan platform!</b>",
         "━━━━━━━━━━━━━━━━━━━",
         f"<b>Skor: {score}/8</b> (raw {raw}/7) {score_bar}",
-        f"🕐 {html_escape(session)}",
+        f" {html_escape(session)}",
         "━━━━━━━━━━━━━━━━━━━",
         f"💰 Harga saat ini: <code>{p:.5f}</code>",
         f"🎯 TP: <code>{result.get('tp', 'N/A')}</code>",
         f"🛑 SL: <code>{result.get('sl', 'N/A')}</code>",
         "━━━━━━━━━━━━━━━━━━━",
-        "📋 <i>Checklist persiapan:</i>",
+        " <i>Checklist persiapan:</i>",
         "  1. Buka Stockity",
         "  2. Pilih aset yang sesuai",
         "  3. Set expiry 5 menit",
         "  4. Tunggu pesan ENTRY berikutnya",
         "━━━━━━━━━━━━━━━━━━━",
-        "💰 <i>Rekomendasi stake: 1-2% saldo</i>",
+        " <i>Rekomendasi stake: 1-2% saldo</i>",
         "🛑 <i>Max loss/hari: 5% saldo</i>",
     ]
     return "\n".join(lines)
@@ -718,7 +719,7 @@ def format_signal_alert(name, symbol, result):
     elif score >= 5.5:
         strength = "💪 KUAT"
     else:
-        strength = "✅ STANDAR (filter ketat lolos)"
+        strength = "✅ STANDAR (filter v3.5 lolos)"
 
     entry_instruction = "🟢 LANGSUNG BELI NAIK (CALL)" if sig == "CALL" else "🔴 LANGSUNG BELI TURUN (PUT)"
 
@@ -740,7 +741,7 @@ def format_signal_alert(name, symbol, result):
         f"📈 RR: 1:1.67",
         "━━━━━━━━━━━━━━━━━━━",
         "✅ <i>Re-validasi lolos - kondisi masih valid</i>",
-        "ℹ️ <i>Filter: ADX lebih dari 22, Vol lebih dari 1.3x, Pattern wajib, Wick OK</i>",
+        "ℹ️ <i>Filter v3.5: ADX lebih dari 20, Vol lebih dari 1.2x, Wick OK</i>",
         "━━━━━━━━━━━━━━━━━━━",
         "💰 <i>Stake: 1-2% saldo</i>",
         "🛑 <i>Max loss/hari: 5% saldo</i>",
@@ -895,7 +896,7 @@ def scan_loop():
 # ==================== FLASK ROUTE ====================
 @app.route("/")
 def index():
-    return "Aswadd Bot Multi-Asset Final v3.6 is running!"
+    return "Aswadd Bot Multi-Asset Final v3.5 is running!"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
