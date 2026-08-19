@@ -10,7 +10,7 @@ import telebot
 # ==================== KONFIGURASI FINAL ====================
 CHAT_ID        = os.environ.get("CHAT_ID", "971243017")
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "300"))
-COOLDOWN_MIN   = int(os.environ.get("COOLDOWN_MIN
+COOLDOWN_MIN   = int(os.environ.get("COOLDOWN_MIN", "10"))
 MIN_SCORE_BASE = float(os.environ.get("MIN_SCORE_BASE", "5.0"))
 
 EXPIRY_MINUTES = 5
@@ -62,7 +62,7 @@ def setup_handlers(b):
     def cmd_start(message):
         asset_list = "\n".join([f"  • {html_escape(v)}" for v in ASSETS.values()])
         b.reply_to(message,
-            f"🤖 <b>Aswadd Bot Multi-Asset Final v3.5</b>\n\n"
+            f"🤖 <b>Aswadd Bot Multi-Asset Final v3.6</b>\n\n"
             f"🔕 <b>MODE SENYAP AKTIF</b>\n"
             f"Bot hanya kirim notifikasi saat ada sinyal:\n"
             f"  🔔 Early Warning (persiapan)\n"
@@ -98,7 +98,7 @@ def setup_handlers(b):
         session = get_session_name(hour)
         active_assets = [v for k, v in ASSETS.items()]
         b.reply_to(message,
-            f"✅ <b>Bot Aktif — Mode Senyap v3.5</b>\n"
+            f"✅ <b>Bot Aktif - Mode Senyap v3.6</b>\n"
             f"Aset: {html_escape(', '.join(active_assets))}\n"
             f"Min skor: {MIN_SCORE_BASE}/8\n"
             f"Expiry: {EXPIRY_MINUTES}m (fixed)\n"
@@ -172,79 +172,78 @@ def setup_handlers(b):
 
     @b.message_handler(commands=["debug"])
     def cmd_debug(message):
-        b.reply_to(message, "🔧 <i>Menjalankan diagnosa ringan...</i>", parse_mode="HTML")
-        lines = ["🔧 <b>DIAGNOSA RINGAN</b>", "━━━━━━━━━━━━━━━━━━"]
-        
-        for symbol, name in ASSETS.items():
-            try:
-                closes, highs, lows, opens, volumes = fetch_prices(symbol, days=3)
-                
-                if not closes:
-                    lines.append(f"\n❌ <b>{html_escape(name)}</b>: Data gagal diambil")
-                    continue
-                
-                lines.append(f"\n📊 <b>{html_escape(name)}</b>")
-                lines.append(f"   Candle didapat: {len(closes)}")
-                lines.append(f"   Harga terakhir: {closes[-1]:.5f}")
-                
-                if len(closes) < 200:
-                    lines.append(f"   ⚠️ Kurang dari 200 candle - backtest skip")
+        def run_debug_async():
+            lines = ["🔧 <b>DIAGNOSA RINGAN</b>", "━━━━━━━━━━━━━━━━━━"]
+            
+            for symbol, name in ASSETS.items():
+                try:
+                    closes, highs, lows, opens, volumes = fetch_prices(symbol, days=3)
+                    
+                    if not closes:
+                        lines.append(f"\n❌ <b>{html_escape(name)}</b>: Data gagal diambil")
+                        continue
+                    
+                    lines.append(f"\n📊 <b>{html_escape(name)}</b>")
+                    lines.append(f"   Candle didapat: {len(closes)}")
+                    lines.append(f"   Harga terakhir: {closes[-1]:.5f}")
+                    
+                    if len(closes) < 200:
+                        lines.append(f"   ⚠️ Kurang dari 200 candle - backtest skip")
+                        adx_now, _, _ = calc_adx(highs, lows, closes)
+                        vol_now = calc_volume_ratio(volumes)
+                        lines.append(f"   ADX sekarang: {adx_now} | Vol: {vol_now}x")
+                        continue
+                    
+                    cross_count = 0
+                    both_pass = 0
+                    sample_size = min(100, len(closes) - 101)
+                    
+                    for i in range(len(closes) - sample_size, len(closes) - 1):
+                        window_closes = closes[:i+1]
+                        window_highs = highs[:i+1]
+                        window_lows = lows[:i+1]
+                        window_volumes = volumes[:i+1]
+                        
+                        ema9_s = calc_ema_series(window_closes, 9)
+                        ema21_s = calc_ema_series(window_closes, 21)
+                        if len(ema9_s) < 3 or len(ema21_s) < 3:
+                            continue
+                        
+                        prev_diff = ema9_s[-3] - ema21_s[-3]
+                        curr_diff = ema9_s[-1] - ema21_s[-1]
+                        golden_cross = prev_diff <= 0 and curr_diff > 0
+                        death_cross = prev_diff >= 0 and curr_diff < 0
+                        
+                        if golden_cross or death_cross:
+                            cross_count += 1
+                            adx_val, _, _ = calc_adx(window_highs, window_lows, window_closes)
+                            vol_ratio = calc_volume_ratio(window_volumes)
+                            if adx_val >= 15 and vol_ratio >= 0.9:
+                                both_pass += 1
+                    
+                    lines.append(f"   EMA Cross (sample 100): {cross_count}")
+                    lines.append(f"   Lolos filter (ADX&gt;=15 + Vol&gt;=0.9x): {both_pass}")
+                    
                     adx_now, _, _ = calc_adx(highs, lows, closes)
                     vol_now = calc_volume_ratio(volumes)
                     lines.append(f"   ADX sekarang: {adx_now} | Vol: {vol_now}x")
-                    continue
-                
-                cross_count = 0
-                both_pass = 0
-                sample_size = min(200, len(closes) - 101)
-                
-                for i in range(len(closes) - sample_size, len(closes) - 1):
-                    window_closes = closes[:i+1]
-                    window_highs = highs[:i+1]
-                    window_lows = lows[:i+1]
-                    window_volumes = volumes[:i+1]
                     
-                    ema9_s = calc_ema_series(window_closes, 9)
-                    ema21_s = calc_ema_series(window_closes, 21)
-                    if len(ema9_s) < 3 or len(ema21_s) < 3:
-                        continue
-                    
-                    prev_diff = ema9_s[-3] - ema21_s[-3]
-                    curr_diff = ema9_s[-1] - ema21_s[-1]
-                    golden_cross = prev_diff <= 0 and curr_diff > 0
-                    death_cross = prev_diff >= 0 and curr_diff < 0
-                    
-                    if golden_cross or death_cross:
-                        cross_count += 1
-                        adx_val, _, _ = calc_adx(window_highs, window_lows, window_closes)
-                        vol_ratio = calc_volume_ratio(window_volumes)
-                        if adx_val >= 15 and vol_ratio >= 0.9:
-                            both_pass += 1
-                
-                lines.append(f"   EMA Cross (sample 200): {cross_count}")
-                lines.append(f"   Lolos filter (ADX&gt;=15 + Vol&gt;=0.9x): {both_pass}")
-                
-                adx_now, _, _ = calc_adx(highs, lows, closes)
-                vol_now = calc_volume_ratio(volumes)
-                lines.append(f"   ADX sekarang: {adx_now} | Vol: {vol_now}x")
-                
-            except Exception as e:
-                lines.append(f"\n❌ <b>{html_escape(name)}</b>: Error - {html_escape(str(e)[:50])}")
-        
-        lines.append("\n━━━━━━━━━━━━━━━━━━")
-        lines.append("<i>Diagnosa ringan: 3 hari data, sample 200 candle</i>")
-        lines.append("<i>Jika 'Candle didapat' kurang dari 200 - masalah data Yahoo</i>")
-        lines.append("<i>Jika 'EMA Cross' = 0 - market sideways</i>")
-        lines.append("<i>Jika 'Lolos filter' = 0 - filter terlalu ketat</i>")
-        
-        try:
-            b.reply_to(message, "\n".join(lines), parse_mode="HTML")
-        except Exception as e:
-            print(f"[DEBUG SEND ERROR] {e}")
+                except Exception as e:
+                    lines.append(f"\n❌ <b>{html_escape(name)}</b>: Error - {html_escape(str(e)[:50])}")
+            
+            lines.append("\n━━━━━━━━━━━━━━━━━━")
+            lines.append("<i>Diagnosa ringan: 3 hari data, sample 100 candle</i>")
+            lines.append("<i>Jika 'Candle didapat' kurang dari 200 - masalah data Yahoo</i>")
+            lines.append("<i>Jika 'EMA Cross' = 0 - market sideways</i>")
+            lines.append("<i>Jika 'Lolos filter' = 0 - filter terlalu ketat</i>")
+            
             try:
-                b.reply_to(message, "❌ <i>Error kirim hasil debug. Cek log Railway.</i>", parse_mode="HTML")
-            except:
-                pass
+                b.send_message(CHAT_ID, "\n".join(lines), parse_mode="HTML")
+            except Exception as e:
+                print(f"[DEBUG SEND ERROR] {e}")
+        
+        threading.Thread(target=run_debug_async, daemon=True).start()
+        b.reply_to(message, "🔧 <i>Diagnosa dijalankan di background...\nHasil akan muncul dalam 30-60 detik.</i>", parse_mode="HTML")
 
 # ==================== SESSION DETECTION ====================
 def get_session_name(hour_utc):
@@ -269,24 +268,23 @@ def is_active_session(hour_utc):
 def is_news_hour(hour_utc):
     return hour_utc in HIGH_IMPACT_NEWS_HOURS_UTC
 
-# ==================== DATA FETCHING (DENGAN RETRY) ====================
+# ==================== DATA FETCHING (DENGAN RETRY + TIMEOUT PENDEK) ====================
 def fetch_prices(symbol, days=3):
     headers_list = [
-        {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
-        {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"},
-        {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"},
+        {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"},
+        {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36"},
     ]
     
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
             params = {"range": f"{days}d", "interval": "5m"}
             headers = headers_list[attempt % len(headers_list)]
-            r = requests.get(url, params=params, headers=headers, timeout=15)
+            r = requests.get(url, params=params, headers=headers, timeout=8)
             
             if r.status_code != 200:
                 print(f"[FETCH RETRY {attempt+1}] {symbol}: HTTP {r.status_code}")
-                time.sleep(2)
+                time.sleep(1)
                 continue
             
             data = r.json()
@@ -304,9 +302,9 @@ def fetch_prices(symbol, days=3):
                     opens[-min_len:], volumes[-min_len:])
         except Exception as e:
             print(f"[FETCH RETRY {attempt+1}] {symbol}: {e}")
-            time.sleep(2)
+            time.sleep(1)
     
-    print(f"[FETCH FAILED] {symbol}: All 3 attempts failed")
+    print(f"[FETCH FAILED] {symbol}: All attempts failed")
     return None, None, None, None, None
 
 # ==================== INDIKATOR ====================
@@ -897,7 +895,7 @@ def scan_loop():
 # ==================== FLASK ROUTE ====================
 @app.route("/")
 def index():
-    return "Aswadd Bot Multi-Asset Final v3.5 is running!"
+    return "Aswadd Bot Multi-Asset Final v3.6 is running!"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
