@@ -10,7 +10,7 @@ import telebot
 # ==================== KONFIGURASI FINAL ====================
 CHAT_ID        = os.environ.get("CHAT_ID", "971243017")
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "300"))
-COOLDOWN_MIN   = int(os.environ.get("COOLDOWN_MIN", "10"))
+COOLDOWN_MIN   = int(os.environ.get("COOLDOWN_MIN
 MIN_SCORE_BASE = float(os.environ.get("MIN_SCORE_BASE", "5.0"))
 
 EXPIRY_MINUTES = 5
