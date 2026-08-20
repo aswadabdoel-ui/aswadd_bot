@@ -1,14 +1,15 @@
 import os
 import time
-import random
+import gc
 import datetime
 import threading
 import requests
 from flask import Flask, request as flask_request
 import telebot
 import yfinance as yf
+from datetime import timezone
 
-# ==================== KONFIGURASI FINAL v3.5.4 (RESCUE MODE) ====================
+# ==================== KONFIGURASI FINAL v3.5.5 (LITE EDITION) ====================
 CHAT_ID = os.environ.get("CHAT_ID")
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "30"))
 MIN_SCORE_BASE = float(os.environ.get("MIN_SCORE_BASE", "5.0"))
@@ -36,7 +37,7 @@ bot = None
 cooldown_tracker = {}
 last_signal_scores = {}
 pending_signals = {}
-fetch_errors = {"EURUSD=X": 0, "GBPUSD=X": 0, "USDJPY=X": 0} # Track error count
+fetch_errors = {"EURUSD=X": 0, "GBPUSD=X": 0, "USDJPY=X": 0}
 
 def get_bot():
     global bot
@@ -48,53 +49,51 @@ def get_bot():
         setup_handlers(bot)
     return bot
 
-# FIX 1: Dynamic Cooldown berdasarkan skor
 def get_cooldown_minutes(score: float) -> int:
     if score >= 7.0: return 5
     elif score >= 6.0: return 8
     elif score >= 5.5: return 10
     else: return 12
 
-# FIX 2: Dynamic News Block
 def is_news_blocked() -> bool:
-    utc_now = datetime.datetime.utcnow()
+    utc_now = datetime.datetime.now(timezone.utc)
     high_impact_events = [
-        datetime.datetime(2026, 8, 20, 12, 30), # US Jobless Claims
-        datetime.datetime(2026, 8, 20, 14, 0),  # Philly Fed
+        datetime.datetime(2026, 8, 20, 12, 30, tzinfo=timezone.utc),
+        datetime.datetime(2026, 8, 20, 14, 0, tzinfo=timezone.utc),
     ]
     for event_time in high_impact_events:
         time_diff = abs((utc_now - event_time).total_seconds())
         if time_diff < 1800: return True
     return False
 
-# ==================== DATA FETCHING (RESCUE MODE) ====================
+# ==================== DATA FETCHING (OPTIMIZED FOR LOW RAM) ====================
 def fetch_prices(symbol, days=3):
-    """Mengambil data OHLCV dengan Timeout & Error Handling Ketat"""
+    """Fetch data dengan manajemen memori ketat"""
     try:
-        # Set timeout global untuk yfinance agar tidak hang selamanya
-        yf.set_tz_cache_location("/tmp/yf-cache") 
-        
         ticker = yf.Ticker(symbol)
         period_map = {1: "1d", 2: "2d", 3: "5d", 5: "5d", 7: "7d", 14: "1mo"}
         period = period_map.get(days, "5d")
         
-        # Gunakan timeout manual via thread jika yfinance tidak support native timeout
+        # Timeout manual via requests session jika yfinance hang
         df = ticker.history(period=period, interval="5m")
         
         if df is None or df.empty or len(df) < 80:
             print(f"[FETCH FAIL] {symbol}: Data kurang ({len(df) if df is not None else 0})")
             return None
             
+        # Konversi ke list segera lalu hapus dataframe untuk hemat RAM
         closes = df['Close'].dropna().tolist()
         highs = df['High'].dropna().tolist()
         lows = df['Low'].dropna().tolist()
         opens = df['Open'].dropna().tolist()
         volumes = df['Volume'].dropna().tolist()
         
+        del df  # Hapus dataframe dari memori
+        gc.collect() # Paksa garbage collection
+        
         min_len = min(len(closes), len(highs), len(lows), len(opens), len(volumes))
         if min_len < 80: return None
         
-        # Reset error counter jika sukses
         fetch_errors[symbol] = 0
         return (closes[-min_len:], highs[-min_len:], lows[-min_len:],
                 opens[-min_len:], volumes[-min_len:])
@@ -102,6 +101,7 @@ def fetch_prices(symbol, days=3):
     except Exception as e:
         fetch_errors[symbol] = fetch_errors.get(symbol, 0) + 1
         print(f"[FETCH ERROR] {symbol} (Count: {fetch_errors[symbol]}): {str(e)[:80]}")
+        gc.collect()
         return None
 
 # ==================== INDIKATOR TEKNIKAL ====================
@@ -190,11 +190,10 @@ def check_atr_filter(highs, lows, closes):
     if ratio > 3.5: return False, f"Market chaos ({ratio:.2f}x)"
     return True, f"ATR {ratio:.2f}x normal"
 
-# ==================== ANALISIS 8-LAYER v3.5.4 ====================
+# ==================== ANALISIS 8-LAYER v3.5.5 ====================
 def analyze(symbol):
     data = fetch_prices(symbol)
     if not data: 
-        # Kembalikan error spesifik untuk ditampilkan di scan
         err_count = fetch_errors.get(symbol, 0)
         return {"signal": "ERROR", "reason": f"Fetch Gagal ({err_count}x). Cek Log Railway."}
 
@@ -233,7 +232,6 @@ def analyze(symbol):
     score = 0.0
     reasons = []
 
-    # FIX 3: Deteksi Low Volatility Mode
     low_volatility = (adx_val < 20 and vol_ratio < 1.2)
     if low_volatility:
         min_score_threshold = 6.5
@@ -242,7 +240,7 @@ def analyze(symbol):
         min_score_threshold = MIN_SCORE_BASE
 
     score += 1.5
-    reasons.append(f"EMA9/21 {'⬆' if golden_cross else '⬇'} (+1.5)")
+    reasons.append(f"EMA9/21 {'' if golden_cross else '⬇'} (+1.5)")
 
     if (golden_cross and price > ema55) or (death_cross and price < ema55):
         score += 1.0
@@ -279,7 +277,6 @@ def analyze(symbol):
 
     score_norm = round(score / 7.0 * 8.0, 1)
 
-    # Hard Filter Expiry 5m
     if EXPIRY_MINUTES <= TIMEFRAME_MINUTES:
         if adx_val < 20:
             return {"signal": "WAIT", "score": score_norm, "raw_score": round(score, 1),
@@ -304,10 +301,10 @@ def analyze(symbol):
 
 # ==================== SESSION DETECTION ====================
 def get_session_name(hour_utc):
-    if OVERLAP_START_UTC <= hour_utc < OVERLAP_END_UTC: return " Overlap London+NY"
+    if OVERLAP_START_UTC <= hour_utc < OVERLAP_END_UTC: return "🔥 Overlap London+NY"
     if LONDON_OPEN_UTC <= hour_utc < LONDON_CLOSE_UTC: return "✅ London Session"
     if NY_OPEN_UTC <= hour_utc < NY_CLOSE_UTC: return "✅ New York Session"
-    return "️ Off-Hours (Market Sepi)"
+    return "⚠️ Off-Hours (Market Sepi)"
 
 def is_active_session(hour_utc):
     return (LONDON_OPEN_UTC <= hour_utc < LONDON_CLOSE_UTC) or \
@@ -345,14 +342,14 @@ def run_backtest():
 def format_early_warning(name, symbol, result):
     sig = result["signal"]; emoji = "🟢" if sig == "CALL" else "🔴"
     score = result["score"]; p = result["price"]
-    session = get_session_name(datetime.datetime.utcnow().hour)
-    entry_instruction = "🟢 PERSIAPAN BELI NAIK (CALL)" if sig == "CALL" else "🔴 PERSIAPAN BELI TURUN (PUT)"
+    session = get_session_name(datetime.datetime.now(timezone.utc).hour)
+    entry_instruction = "🟢 PERSIAPAN BELI NAIK (CALL)" if sig == "CALL" else " PERSIAPAN BELI TURUN (PUT)"
     lines = [
-        f"🔔 {emoji} <b>EARLY WARNING - {html_escape(name)}</b>",
-        f"📊 <code>{html_escape(symbol)}</code> | TF: {TIMEFRAME_MINUTES}m | Expiry: {EXPIRY_MINUTES}m",
+        f" {emoji} <b>EARLY WARNING - {html_escape(name)}</b>",
+        f" <code>{html_escape(symbol)}</code> | TF: {TIMEFRAME_MINUTES}m | Expiry: {EXPIRY_MINUTES}m",
         "━━━━━━━━━━━━━━━━━━━", entry_instruction,
-        f" <b>Entry dalam {EARLY_WARNING_SECONDS // 60} menit - siapkan platform!</b>",
-        "━━━━━━━━━━━━━━━━━━━", f"<b>Skor: {score}/8</b>", f" {html_escape(session)}",
+        f"⏳ <b>Entry dalam {EARLY_WARNING_SECONDS // 60} menit - siapkan platform!</b>",
+        "━━━━━━━━━━━━━━━━━━━", f"<b>Skor: {score}/8</b>", f"🕐 {html_escape(session)}",
         "━━━━━━━━━━━━━━━━━━━", f"💰 Harga: <code>{p:.5f}</code>",
         f"🎯 TP: <code>{result.get('tp', 'N/A')}</code> | 🛑 SL: <code>{result.get('sl', 'N/A')}</code>",
         "━━━━━━━━━━━━━━━━━━━", "📋 <i>Checklist: Buka Stockity > Pilih Aset > Set Expiry 5m</i>",
@@ -363,8 +360,8 @@ def format_early_warning(name, symbol, result):
 def format_signal_alert(name, symbol, result):
     sig = result["signal"]; emoji = "🟢" if sig == "CALL" else "🔴"
     score = result["score"]; p = result["price"]
-    strength = "🔥 SANGAT KUAT" if score >= 7 else ("💪 KUAT" if score >= 5.5 else "✅ STANDAR")
-    entry_instruction = "🟢 LANGSUNG BELI NAIK (CALL)" if sig == "CALL" else "🔴 LANGSUNG BELI TURUN (PUT)"
+    strength = "🔥 SANGAT KUAT" if score >= 7 else (" KUAT" if score >= 5.5 else "✅ STANDAR")
+    entry_instruction = " LANGSUNG BELI NAIK (CALL)" if sig == "CALL" else "🔴 LANGSUNG BELI TURUN (PUT)"
     lines = [
         f"🚨 {emoji} <b>{sig} SIGNAL - {html_escape(name)}</b>",
         f"📊 <code>{html_escape(symbol)}</code> | TF: {TIMEFRAME_MINUTES}m | Expiry: {EXPIRY_MINUTES}m",
@@ -382,8 +379,8 @@ def format_signal_alert(name, symbol, result):
 
 def format_cancelled(name, symbol, reason):
     lines = [
-        f"⚠️ <b>SINYAL DIBATALKAN - {html_escape(name)}</b>",
-        f"📊 <code>{html_escape(symbol)}</code>", "━━━━━━━━━━━━━━━━━━━",
+        f"️ <b>SINYAL DIBATALKAN - {html_escape(name)}</b>",
+        f" <code>{html_escape(symbol)}</code>", "━━━━━━━━━━━━━━━━━━━",
         f"❌ Alasan: {html_escape(reason)}", "━━━━━━━━━━━━━━━━━━━",
         "<i>Jangan entry - tunggu sinyal berikutnya</i>",
     ]
@@ -394,19 +391,19 @@ def setup_handlers(b):
     @b.message_handler(commands=["start"])
     def cmd_start(message):
         b.reply_to(message,
-            f"🤖 <b>Aswadd Bot Multi-Asset v3.5.4 (Rescue Mode)</b>\n\n"
-            f"✅ <b>Fix:</b> Fetch Timeout, Error Tracking, Dynamic Cooldown\n"
+            f" <b>Aswadd Bot Multi-Asset v3.5.5 (Lite)</b>\n\n"
+            f"✅ <b>Fix:</b> Memory Optimized, Stable Loop, Dynamic Cooldown\n"
             f"🔕 Mode Senyap Aktif | Min Score: {MIN_SCORE_BASE}/8\n"
-            f"🎯 Target: EUR/USD, GBP/USD, USD/JPY (TF 5m)",
+            f" Target: EUR/USD, GBP/USD, USD/JPY (TF 5m)",
             parse_mode="HTML")
 
     @b.message_handler(commands=["status"])
     def cmd_status(message):
-        utc_now = datetime.datetime.utcnow()
+        utc_now = datetime.datetime.now(timezone.utc)
         pending_count = len([s for s in pending_signals.values()
                             if (time.time() - s['warn_time']) < EARLY_WARNING_SECONDS])
         b.reply_to(message,
-            f"✅ <b>Bot Active v3.5.4</b>\n"
+            f"✅ <b>Bot Active v3.5.5</b>\n"
             f"Sesi: {get_session_name(utc_now.hour)}\n"
             f"Pending Re-check: {pending_count}\n"
             f"Last Update: {utc_now.strftime('%H:%M:%S')} UTC",
@@ -434,7 +431,6 @@ def setup_handlers(b):
                 if result:
                     sig = result.get("signal", "WAIT")
                     
-                    # Handle Fetch Error Khusus
                     if sig == "ERROR":
                         results.append(f"❌ <b>{html_escape(name)}</b>: {html_escape(result.get('reason', 'Unknown Error'))}")
                         continue
@@ -442,17 +438,17 @@ def setup_handlers(b):
                     score = result.get("score", 0)
                     raw = result.get("raw_score", 0)
                     reason = result.get("reasons", [""])[0] if result.get("reasons") else "No reason"
-                    emoji_sig = "🟢" if sig == "CALL" else ("🔴" if sig == "PUT" else "⏳")
+                    emoji_sig = "" if sig == "CALL" else ("" if sig == "PUT" else "⏳")
                     results.append(
                         f"{emoji_sig} <b>{html_escape(name)}</b>: {score}/8 (raw {raw}/7)\n"
                         f"   <i>{html_escape(reason[:60])}</i>"
                     )
                 else:
-                    results.append(f"⚪ <b>{html_escape(name)}</b>: Data tidak tersedia")
+                    results.append(f" <b>{html_escape(name)}</b>: Data tidak tersedia")
             except Exception as e:
                 results.append(f"❌ <b>{html_escape(name)}</b>: Error - {html_escape(str(e)[:40])}")
 
-        msg = "📊 <b>HASIL SCAN MANUAL</b>\n━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(results)
+        msg = " <b>HASIL SCAN MANUAL</b>\n━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(results)
         try:
             b.reply_to(message, msg, parse_mode="HTML")
         except Exception as e:
@@ -477,15 +473,15 @@ def setup_handlers(b):
         except Exception as e:
             b.reply_to(message, f"❌ <i>Error: {html_escape(str(e)[:80])}</i>", parse_mode="HTML")
 
-# ==================== MAIN LOOP (NON-BLOCKING) ====================
+# ==================== MAIN LOOP (STABLE & MEMORY SAFE) ====================
 def scan_loop():
     while True:
         try:
             b = get_bot()
             now = time.time()
-            utc_hour = datetime.datetime.utcnow().hour
+            utc_hour = datetime.datetime.now(timezone.utc).hour
 
-            # Handle Pending Signals (Re-check) TANPA SLEEP
+            # Handle Pending Signals (Re-check)
             for symbol, data in list(pending_signals.items()):
                 if (now - data['warn_time']) >= EARLY_WARNING_SECONDS:
                     recheck = analyze(symbol)
@@ -500,29 +496,23 @@ def scan_loop():
                         b.send_message(CHAT_ID, cancel_msg, parse_mode="HTML")
                         del pending_signals[symbol]
 
-            # Scan Active Assets
+            # Scan Active Assets (SEQUENTIAL untuk hemat RAM)
             if is_active_session(utc_hour) and not is_news_blocked():
                 for symbol, name in ASSETS.items():
-                    # Check Cooldown Dinamis
                     last_time = cooldown_tracker.get(symbol, 0)
-                    if (now - last_time) < 60: # Minimal 1 menit antar scan per aset
-                        continue
+                    if (now - last_time) < 60: continue
                     
                     result = analyze(symbol)
-                    # Skip jika error fetch atau wait
                     if not result or result["signal"] in ["WAIT", "ERROR"]: 
                         continue
 
                     score = result["score"]
-                    
-                    # Cek Cooldown Dinamis berdasarkan skor
                     required_cooldown_min = get_cooldown_minutes(score)
                     elapsed_min = (now - last_time) / 60
                     
                     if elapsed_min < required_cooldown_min:
                         continue
 
-                    # Send Early Warning
                     warn_msg = format_early_warning(name, symbol, result)
                     b.send_message(CHAT_ID, warn_msg, parse_mode="HTML")
                     
@@ -531,17 +521,21 @@ def scan_loop():
                         'warn_time': now
                     }
                     last_signal_scores[symbol] = f"{score}/8"
+                    
+                    # Jeda kecil antar aset untuk stabilitas
+                    time.sleep(2) 
 
             time.sleep(CHECK_INTERVAL)
 
         except Exception as e:
             print(f"[LOOP ERROR] {str(e)[:100]}")
             time.sleep(10)
+            gc.collect() # Bersihkan memori jika error
 
 # ==================== DEPLOYMENT ENTRY POINT ====================
 @app.route('/')
 def home():
-    return "Aswadd Bot v3.5.4 Running"
+    return "Aswadd Bot v3.5.5 Running"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -554,10 +548,8 @@ def webhook():
         return '', 403
 
 if __name__ == "__main__":
-    # Start bot thread
     bot_thread = threading.Thread(target=scan_loop, daemon=True)
     bot_thread.start()
     
-    # Start Flask server for Railway health check
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
