@@ -8,10 +8,10 @@ from flask import Flask, request as flask_request
 import telebot
 import yfinance as yf
 
-# ==================== KONFIGURASI FINAL v3.5.2 (BUG FIXED) ====================
+# ==================== KONFIGURASI FINAL v3.5.3 (OPTIMIZED) ====================
 CHAT_ID = os.environ["CHAT_ID"]
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "30"))
-COOLDOWN_MIN = int(os.environ.get("COOLDOWN_MIN", "15"))
+# COOLDOWN_MIN tidak lagi digunakan sebagai fixed value, diganti fungsi dynamic
 MIN_SCORE_BASE = float(os.environ.get("MIN_SCORE_BASE", "5.0"))
 
 EXPIRY_MINUTES = 5
@@ -27,9 +27,9 @@ ASSETS = {
 LONDON_OPEN_UTC, LONDON_CLOSE_UTC = 7, 16
 NY_OPEN_UTC, NY_CLOSE_UTC = 12, 21
 OVERLAP_START_UTC, OVERLAP_END_UTC = 13, 16
-HIGH_IMPACT_NEWS_HOURS_UTC = [12, 13, 14]
+# HIGH_IMPACT_NEWS_HOURS_UTC tidak lagi digunakan, diganti fungsi dynamic
 
-# ==================== HELPER ====================
+# ==================== HELPER & DYNAMIC FILTERS ====================
 def html_escape(text):
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -49,19 +49,49 @@ def get_bot():
         setup_handlers(bot)
     return bot
 
+# FIX 1: Dynamic Cooldown berdasarkan skor
+def get_cooldown_minutes(score: float) -> int:
+    if score >= 7.0:
+        return 5   # High confidence: short cooldown
+    elif score >= 6.0:
+        return 8   # Medium-high confidence
+    elif score >= 5.5:
+        return 10  # Medium confidence
+    else:
+        return 12  # Low-medium confidence (masih di atas min 5.0)
+
+# FIX 2: Dynamic News Block (Update list ini setiap minggu)
+def is_news_blocked() -> bool:
+    utc_now = datetime.datetime.utcnow()
+    
+    # === UPDATE INI SETIAP MINGGU ===
+    high_impact_events = [
+        # Contoh: Economic calendar 19-21 Agustus 2026
+        datetime.datetime(2026, 8, 19, 6, 0),   # UK CPI YoY
+        datetime.datetime(2026, 8, 19, 12, 30), # US Crude Oil Inventories
+        datetime.datetime(2026, 8, 19, 18, 0),  # FOMC Meeting Minutes
+        datetime.datetime(2026, 8, 20, 12, 30), # US Initial Jobless Claims
+        datetime.datetime(2026, 8, 20, 14, 0),  # Philadelphia Fed Manufacturing Index
+    ]
+    
+    for event_time in high_impact_events:
+        time_diff = abs((utc_now - event_time).total_seconds())
+        if time_diff < 1800:  # 30 menit sebelum/sesudah
+            return True
+    return False
+
 # ==================== DATA FETCHING (FIXED: pakai yfinance) ====================
 def fetch_prices(symbol, days=3):
-    """Mengambil data OHLCV menggunakan library yfinance (lebih stabil dari API langsung)"""
+    """Mengambil data OHLCV menggunakan library yfinance"""
     try:
         ticker = yf.Ticker(symbol)
-        # interval 5m, period sesuai days
         period_map = {1: "1d", 2: "2d", 3: "5d", 5: "5d", 7: "7d", 14: "1mo"}
         period = period_map.get(days, "5d")
         
         df = ticker.history(period=period, interval="5m")
         
         if df is None or df.empty or len(df) < 80:
-            print(f"[FETCH] {symbol}: Data kurang dari 80 candle (dapat {len(df) if df is not None else 0})")
+            print(f"[FETCH] {symbol}: Data kurang dari 80 candle")
             return None, None, None, None, None
         
         closes = df['Close'].dropna().tolist()
@@ -72,10 +102,8 @@ def fetch_prices(symbol, days=3):
         
         min_len = min(len(closes), len(highs), len(lows), len(opens), len(volumes))
         if min_len < 80:
-            print(f"[FETCH] {symbol}: Data tidak sinkron (min_len={min_len})")
             return None, None, None, None, None
         
-        print(f"[FETCH OK] {symbol}: {min_len} candles loaded")
         return (closes[-min_len:], highs[-min_len:], lows[-min_len:],
                 opens[-min_len:], volumes[-min_len:])
     
@@ -195,7 +223,7 @@ def check_atr_filter(highs, lows, closes):
         return False, f"Market chaos ({ratio:.2f}x)"
     return True, f"ATR {ratio:.2f}x normal"
 
-# ==================== ANALISIS 8-LAYER v3.5.2 ====================
+# ==================== ANALISIS 8-LAYER v3.5.3 (WITH LOW VOL FALLBACK) ====================
 def analyze(symbol):
     closes, highs, lows, opens, volumes = fetch_prices(symbol)
     if not closes or len(closes) < 80:
@@ -235,6 +263,14 @@ def analyze(symbol):
     score = 0.0
     reasons = []
 
+    # FIX 3: Deteksi Low Volatility Mode
+    low_volatility = (adx_val < 20 and vol_ratio < 1.2)
+    if low_volatility:
+        min_score_threshold = 6.5
+        reasons.append("⚠️ Mode Konservatif (Low Vol)")
+    else:
+        min_score_threshold = MIN_SCORE_BASE
+
     score += 1.5
     reasons.append(f"EMA9/21 {'⬆' if golden_cross else '⬇'} (+1.5)")
 
@@ -246,19 +282,25 @@ def analyze(symbol):
         score += 1.0
         reasons.append(f"RSI {rsi} netral (+1.0)")
 
-    if adx_val >= 20:
+    if adx_val >= 25:
+        score += 1.5
+        reasons.append(f"ADX {adx_val} kuat (+1.5)")
+    elif adx_val >= 20:
         score += 1.0
-        reasons.append(f"ADX {adx_val} kuat (+1.0)")
-    elif adx_val >= 15:
-        score += 0.5
-        reasons.append(f"ADX {adx_val} sedang (+0.5)")
+        reasons.append(f"ADX {adx_val} moderat (+1.0)")
+    else:
+        score += 0.3
+        reasons.append(f"ADX {adx_val} lemah (+0.3)")
 
-    if vol_ratio >= 1.2:
-        score += 0.5
-        reasons.append(f"Vol {vol_ratio}x (+0.5)")
-    elif vol_ratio >= 0.8:
-        score += 0.25
-        reasons.append(f"Vol {vol_ratio}x (+0.25)")
+    if vol_ratio >= 1.5:
+        score += 1.5
+        reasons.append(f"Vol {vol_ratio}x tinggi (+1.5)")
+    elif vol_ratio >= 1.2:
+        score += 1.0
+        reasons.append(f"Vol {vol_ratio}x normal (+1.0)")
+    else:
+        score += 0.2
+        reasons.append(f"Vol {vol_ratio}x rendah (+0.2)")
 
     if (golden_cross and candle_pat in ("bullish_engulfing", "hammer")) or \
        (death_cross and candle_pat in ("bearish_engulfing", "shooting_star")):
@@ -276,9 +318,9 @@ def analyze(symbol):
             return {"signal": "WAIT", "score": score_norm, "raw_score": round(score, 1),
                     "reasons": [f"Vol {vol_ratio}x < 1.2 (momentum kurang)"]}
 
-    if score_norm < MIN_SCORE_BASE:
+    if score_norm < min_score_threshold:
         return {"signal": "WAIT", "score": score_norm, "raw_score": round(score, 1),
-                "reasons": [f"Skor {score_norm}/8 < {MIN_SCORE_BASE}"]}
+                "reasons": [f"Skor {score_norm}/8 < {min_score_threshold}"]}
 
     atr = (highs[-1] - lows[-1]) * 1.5
     sl = round(price - 1.5 * atr, 5) if direction == "CALL" else round(price + 1.5 * atr, 5)
@@ -303,9 +345,6 @@ def get_session_name(hour_utc):
 def is_active_session(hour_utc):
     return (LONDON_OPEN_UTC <= hour_utc < LONDON_CLOSE_UTC) or \
            (NY_OPEN_UTC <= hour_utc < NY_CLOSE_UTC)
-
-def is_news_hour(hour_utc):
-    return hour_utc in HIGH_IMPACT_NEWS_HOURS_UTC
 
 # ==================== BACKTEST JUJUR ====================
 def run_backtest():
@@ -408,10 +447,9 @@ def setup_handlers(b):
     @b.message_handler(commands=["start"])
     def cmd_start(message):
         b.reply_to(message,
-            f"🤖 <b>Aswadd Bot Multi-Asset v3.5.2 (Bug Fixed)</b>\n\n"
-            f"✅ <b>Fix:</b> yfinance data fetch, scan feedback, non-blocking\n"
+            f"🤖 <b>Aswadd Bot Multi-Asset v3.5.3 (Optimized)</b>\n\n"
+            f"✅ <b>Fix:</b> Dynamic Cooldown, News Block, Low Vol Fallback\n"
             f"🔕 Mode Senyap Aktif | Min Score: {MIN_SCORE_BASE}/8\n"
-            f"⏳ Cooldown: {COOLDOWN_MIN} menit | Expiry: {EXPIRY_MINUTES}m\n"
             f"🎯 Target: EUR/USD, GBP/USD, USD/JPY (TF 5m)",
             parse_mode="HTML")
 
@@ -421,7 +459,7 @@ def setup_handlers(b):
         pending_count = len([s for s in pending_signals.values()
                             if (time.time() - s['warn_time']) < EARLY_WARNING_SECONDS])
         b.reply_to(message,
-            f"✅ <b>Bot Active v3.5.2</b>\n"
+            f"✅ <b>Bot Active v3.5.3</b>\n"
             f"Sesi: {get_session_name(utc_now.hour)}\n"
             f"Pending Re-check: {pending_count}\n"
             f"Last Update: {utc_now.strftime('%H:%M:%S')} UTC",
@@ -502,53 +540,68 @@ def scan_loop():
                         alert_msg = format_signal_alert(ASSETS[symbol], symbol, recheck)
                         b.send_message(CHAT_ID, alert_msg, parse_mode="HTML")
                         cooldown_tracker[symbol] = now
-                        last_signal_scores[symbol] = f"{recheck.get('score', 0)}/8 ✅ ENTRY"
+                        last_signal_scores[symbol] = f"{recheck['score']}/8"
+                        del pending_signals[symbol]
                     else:
                         cancel_msg = format_cancelled(ASSETS[symbol], symbol, "Kondisi berubah saat re-check")
                         b.send_message(CHAT_ID, cancel_msg, parse_mode="HTML")
-                        last_signal_scores[symbol] = "❌ CANCELLED"
-                    pending_signals.pop(symbol, None)
+                        del pending_signals[symbol]
 
-            # Scan Market (hanya sesi aktif & bukan news hour)
-            if is_active_session(utc_hour) and not is_news_hour(utc_hour):
+            # Scan Active Assets
+            if is_active_session(utc_hour) and not is_news_blocked():
                 for symbol, name in ASSETS.items():
-                    if symbol in pending_signals:
+                    # Check Cooldown Dinamis
+                    last_time = cooldown_tracker.get(symbol, 0)
+                    if (now - last_time) < 60: # Minimal 1 menit antar scan per aset
                         continue
-                    if (now - cooldown_tracker.get(symbol, 0)) < (COOLDOWN_MIN * 60):
-                        continue
-
+                    
                     result = analyze(symbol)
-                    if result and result.get("signal") in ("CALL", "PUT"):
-                        warning_msg = format_early_warning(name, symbol, result)
-                        b.send_message(CHAT_ID, warning_msg, parse_mode="HTML")
-                        pending_signals[symbol] = {"result": result, "warn_time": now}
-                        last_signal_scores[symbol] = f"{result.get('score', 0)}/8 ⏳ PENDING"
-                    elif result:
-                        reason = result.get('reasons', [''])[0] if result.get('reasons') else 'WAIT'
-                        last_signal_scores[symbol] = f"{result.get('score', 0)}/8 ❌ {reason[:30]}"
+                    if result and result["signal"] != "WAIT":
+                        score = result["score"]
+                        
+                        # Cek Cooldown Dinamis berdasarkan skor
+                        required_cooldown_min = get_cooldown_minutes(score)
+                        elapsed_min = (now - last_time) / 60
+                        
+                        if elapsed_min < required_cooldown_min:
+                            continue
+
+                        # Send Early Warning
+                        warn_msg = format_early_warning(name, symbol, result)
+                        b.send_message(CHAT_ID, warn_msg, parse_mode="HTML")
+                        
+                        pending_signals[symbol] = {
+                            'result': result,
+                            'warn_time': now
+                        }
+                        last_signal_scores[symbol] = f"{score}/8"
+
+            time.sleep(CHECK_INTERVAL)
 
         except Exception as e:
-            print(f"[LOOP ERROR] {e}")
+            print(f"[LOOP ERROR] {str(e)[:100]}")
             time.sleep(10)
 
-        time.sleep(CHECK_INTERVAL)
+# ==================== DEPLOYMENT ENTRY POINT ====================
+@app.route('/')
+def home():
+    return "Aswadd Bot v3.5.3 Running"
 
-# ==================== FLASK ROUTE ====================
-@app.route("/")
-def index():
-    return "Aswadd Bot v3.5.2 Bug Fixed Running!"
-
-@app.route("/webhook", methods=["POST"])
+@app.route('/webhook', methods=['POST'])
 def webhook():
-    b = get_bot()
-    json_str = flask_request.get_data().decode("UTF-8")
-    update = telebot.types.Update.de_json(json_str)
-    b.process_new_updates([update])
-    return "OK", 200
+    if flask_request.headers.get('content-type') == 'application/json':
+        json_string = flask_request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return '', 200
+    else:
+        return '', 403
 
-# ==================== START ====================
 if __name__ == "__main__":
-    scanner = threading.Thread(target=scan_loop, daemon=True)
-    scanner.start()
+    # Start bot thread
+    bot_thread = threading.Thread(target=scan_loop, daemon=True)
+    bot_thread.start()
+    
+    # Start Flask server for Railway health check
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
