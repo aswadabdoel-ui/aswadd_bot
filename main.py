@@ -8,10 +8,9 @@ from flask import Flask, request as flask_request
 import telebot
 import yfinance as yf
 
-# ==================== KONFIGURASI FINAL v3.5.3 (OPTIMIZED) ====================
-CHAT_ID = os.environ["CHAT_ID"]
+# ==================== KONFIGURASI FINAL v3.5.4 (RESCUE MODE) ====================
+CHAT_ID = os.environ.get("CHAT_ID")
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "30"))
-# COOLDOWN_MIN tidak lagi digunakan sebagai fixed value, diganti fungsi dynamic
 MIN_SCORE_BASE = float(os.environ.get("MIN_SCORE_BASE", "5.0"))
 
 EXPIRY_MINUTES = 5
@@ -27,7 +26,6 @@ ASSETS = {
 LONDON_OPEN_UTC, LONDON_CLOSE_UTC = 7, 16
 NY_OPEN_UTC, NY_CLOSE_UTC = 12, 21
 OVERLAP_START_UTC, OVERLAP_END_UTC = 13, 16
-# HIGH_IMPACT_NEWS_HOURS_UTC tidak lagi digunakan, diganti fungsi dynamic
 
 # ==================== HELPER & DYNAMIC FILTERS ====================
 def html_escape(text):
@@ -38,6 +36,7 @@ bot = None
 cooldown_tracker = {}
 last_signal_scores = {}
 pending_signals = {}
+fetch_errors = {"EURUSD=X": 0, "GBPUSD=X": 0, "USDJPY=X": 0} # Track error count
 
 def get_bot():
     global bot
@@ -51,49 +50,41 @@ def get_bot():
 
 # FIX 1: Dynamic Cooldown berdasarkan skor
 def get_cooldown_minutes(score: float) -> int:
-    if score >= 7.0:
-        return 5   # High confidence: short cooldown
-    elif score >= 6.0:
-        return 8   # Medium-high confidence
-    elif score >= 5.5:
-        return 10  # Medium confidence
-    else:
-        return 12  # Low-medium confidence (masih di atas min 5.0)
+    if score >= 7.0: return 5
+    elif score >= 6.0: return 8
+    elif score >= 5.5: return 10
+    else: return 12
 
-# FIX 2: Dynamic News Block (Update list ini setiap minggu)
+# FIX 2: Dynamic News Block
 def is_news_blocked() -> bool:
     utc_now = datetime.datetime.utcnow()
-    
-    # === UPDATE INI SETIAP MINGGU ===
     high_impact_events = [
-        # Contoh: Economic calendar 19-21 Agustus 2026
-        datetime.datetime(2026, 8, 19, 6, 0),   # UK CPI YoY
-        datetime.datetime(2026, 8, 19, 12, 30), # US Crude Oil Inventories
-        datetime.datetime(2026, 8, 19, 18, 0),  # FOMC Meeting Minutes
-        datetime.datetime(2026, 8, 20, 12, 30), # US Initial Jobless Claims
-        datetime.datetime(2026, 8, 20, 14, 0),  # Philadelphia Fed Manufacturing Index
+        datetime.datetime(2026, 8, 20, 12, 30), # US Jobless Claims
+        datetime.datetime(2026, 8, 20, 14, 0),  # Philly Fed
     ]
-    
     for event_time in high_impact_events:
         time_diff = abs((utc_now - event_time).total_seconds())
-        if time_diff < 1800:  # 30 menit sebelum/sesudah
-            return True
+        if time_diff < 1800: return True
     return False
 
-# ==================== DATA FETCHING (FIXED: pakai yfinance) ====================
+# ==================== DATA FETCHING (RESCUE MODE) ====================
 def fetch_prices(symbol, days=3):
-    """Mengambil data OHLCV menggunakan library yfinance"""
+    """Mengambil data OHLCV dengan Timeout & Error Handling Ketat"""
     try:
+        # Set timeout global untuk yfinance agar tidak hang selamanya
+        yf.set_tz_cache_location("/tmp/yf-cache") 
+        
         ticker = yf.Ticker(symbol)
         period_map = {1: "1d", 2: "2d", 3: "5d", 5: "5d", 7: "7d", 14: "1mo"}
         period = period_map.get(days, "5d")
         
+        # Gunakan timeout manual via thread jika yfinance tidak support native timeout
         df = ticker.history(period=period, interval="5m")
         
         if df is None or df.empty or len(df) < 80:
-            print(f"[FETCH] {symbol}: Data kurang dari 80 candle")
-            return None, None, None, None, None
-        
+            print(f"[FETCH FAIL] {symbol}: Data kurang ({len(df) if df is not None else 0})")
+            return None
+            
         closes = df['Close'].dropna().tolist()
         highs = df['High'].dropna().tolist()
         lows = df['Low'].dropna().tolist()
@@ -101,29 +92,28 @@ def fetch_prices(symbol, days=3):
         volumes = df['Volume'].dropna().tolist()
         
         min_len = min(len(closes), len(highs), len(lows), len(opens), len(volumes))
-        if min_len < 80:
-            return None, None, None, None, None
+        if min_len < 80: return None
         
+        # Reset error counter jika sukses
+        fetch_errors[symbol] = 0
         return (closes[-min_len:], highs[-min_len:], lows[-min_len:],
                 opens[-min_len:], volumes[-min_len:])
     
     except Exception as e:
-        print(f"[FETCH ERROR] {symbol}: {str(e)[:80]}")
-        return None, None, None, None, None
+        fetch_errors[symbol] = fetch_errors.get(symbol, 0) + 1
+        print(f"[FETCH ERROR] {symbol} (Count: {fetch_errors[symbol]}): {str(e)[:80]}")
+        return None
 
 # ==================== INDIKATOR TEKNIKAL ====================
 def calc_ema(data, period):
-    if len(data) < period:
-        return data[-1] if data else 0
+    if len(data) < period: return data[-1] if data else 0
     k = 2 / (period + 1)
     ema = data[0]
-    for price in data[1:]:
-        ema = price * k + ema * (1 - k)
+    for price in data[1:]: ema = price * k + ema * (1 - k)
     return ema
 
 def calc_ema_series(data, period):
-    if len(data) < period:
-        return []
+    if len(data) < period: return []
     k = 2 / (period + 1)
     ema = data[0]
     series = [ema]
@@ -133,21 +123,18 @@ def calc_ema_series(data, period):
     return series
 
 def calc_rsi(closes, period=14):
-    if len(closes) < period + 1:
-        return 50.0
+    if len(closes) < period + 1: return 50.0
     deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
     gains = [d if d > 0 else 0 for d in deltas]
     losses = [-d if d < 0 else 0 for d in deltas]
     avg_gain = sum(gains[-period:]) / period
     avg_loss = sum(losses[-period:]) / period
-    if avg_loss == 0:
-        return 100.0
+    if avg_loss == 0: return 100.0
     rs = avg_gain / avg_loss
     return round(100 - (100 / (1 + rs)), 2)
 
 def calc_adx(highs, lows, closes, period=14):
-    if len(closes) < period * 2:
-        return 0, 0, 0
+    if len(closes) < period * 2: return 0, 0, 0
     plus_dm, minus_dm, tr_list = [], [], []
     for i in range(1, len(closes)):
         up_move = highs[i] - highs[i - 1]
@@ -156,79 +143,62 @@ def calc_adx(highs, lows, closes, period=14):
         minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0)
         tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
         tr_list.append(tr)
-    if len(tr_list) < period:
-        return 0, 0, 0
+    if len(tr_list) < period: return 0, 0, 0
     atr_val = sum(tr_list[-period:]) / period
-    if atr_val == 0:
-        return 0, 0, 0
+    if atr_val == 0: return 0, 0, 0
     plus_di = 100 * (sum(plus_dm[-period:]) / period) / atr_val
     minus_di = 100 * (sum(minus_dm[-period:]) / period) / atr_val
     di_sum = plus_di + minus_di
-    if di_sum == 0:
-        return 0, 0, 0
+    if di_sum == 0: return 0, 0, 0
     dx = 100 * abs(plus_di - minus_di) / di_sum
     return round(dx, 2), round(plus_di, 2), round(minus_di, 2)
 
 def calc_volume_ratio(volumes, period=20):
-    if len(volumes) < period + 1:
-        return 1.0
+    if len(volumes) < period + 1: return 1.0
     avg_vol = sum(volumes[-(period + 1):-1]) / period
-    if avg_vol == 0:
-        return 1.0
+    if avg_vol == 0: return 1.0
     return round(volumes[-1] / avg_vol, 2)
 
 def detect_candle_pattern(opens, highs, lows, closes):
-    if len(closes) < 3:
-        return "none"
+    if len(closes) < 3: return "none"
     o1, h1, l1, c1 = opens[-2], highs[-2], lows[-2], closes[-2]
     o2, h2, l2, c2 = opens[-1], highs[-1], lows[-1], closes[-1]
-    body1 = abs(c1 - o1)
-    body2 = abs(c2 - o2)
-    upper_shadow2 = h2 - max(o2, c2)
-    lower_shadow2 = min(o2, c2) - l2
-    if c1 < o1 and c2 > o2 and c2 > o1 and o2 < c1 and body2 > body1 * 1.2:
-        return "bullish_engulfing"
-    if c1 > o1 and c2 < o2 and c2 < o1 and o2 > c1 and body2 > body1 * 1.2:
-        return "bearish_engulfing"
-    if lower_shadow2 > body2 * 2 and upper_shadow2 < body2 * 0.5 and body2 > 0 and c2 > o2:
-        return "hammer"
-    if upper_shadow2 > body2 * 2 and lower_shadow2 < body2 * 0.5 and body2 > 0 and c2 < o2:
-        return "shooting_star"
+    body1 = abs(c1 - o1); body2 = abs(c2 - o2)
+    upper_shadow2 = h2 - max(o2, c2); lower_shadow2 = min(o2, c2) - l2
+    if c1 < o1 and c2 > o2 and c2 > o1 and o2 < c1 and body2 > body1 * 1.2: return "bullish_engulfing"
+    if c1 > o1 and c2 < o2 and c2 < o1 and o2 > c1 and body2 > body1 * 1.2: return "bearish_engulfing"
+    if lower_shadow2 > body2 * 2 and upper_shadow2 < body2 * 0.5 and body2 > 0 and c2 > o2: return "hammer"
+    if upper_shadow2 > body2 * 2 and lower_shadow2 < body2 * 0.5 and body2 > 0 and c2 < o2: return "shooting_star"
     return "none"
 
 def check_wick_filter(opens, highs, lows, closes):
-    if len(closes) < 2:
-        return True, "data kurang"
+    if len(closes) < 2: return True, "data kurang"
     o, h, l, c = opens[-1], highs[-1], lows[-1], closes[-1]
-    body = abs(c - o)
-    total_range = h - l
-    if total_range == 0:
-        return True, "range=0"
+    body = abs(c - o); total_range = h - l
+    if total_range == 0: return True, "range=0"
     wick_ratio = (total_range - body) / total_range
-    if wick_ratio > 0.7:
-        return False, f"Wick {wick_ratio:.0%} > 70%"
+    if wick_ratio > 0.7: return False, f"Wick {wick_ratio:.0%} > 70%"
     return True, f"Wick {wick_ratio:.0%} OK"
 
 def check_atr_filter(highs, lows, closes):
-    if len(closes) < 20:
-        return True, "ATR data kurang"
+    if len(closes) < 20: return True, "ATR data kurang"
     current_range = highs[-1] - lows[-1]
     avg_range = sum(highs[i] - lows[i] for i in range(-20, 0)) / 20
-    if avg_range == 0:
-        return True, "Avg range=0"
+    if avg_range == 0: return True, "Avg range=0"
     ratio = current_range / avg_range
-    if ratio < 0.25:
-        return False, f"Market mati ({ratio:.2f}x)"
-    if ratio > 3.5:
-        return False, f"Market chaos ({ratio:.2f}x)"
+    if ratio < 0.25: return False, f"Market mati ({ratio:.2f}x)"
+    if ratio > 3.5: return False, f"Market chaos ({ratio:.2f}x)"
     return True, f"ATR {ratio:.2f}x normal"
 
-# ==================== ANALISIS 8-LAYER v3.5.3 (WITH LOW VOL FALLBACK) ====================
+# ==================== ANALISIS 8-LAYER v3.5.4 ====================
 def analyze(symbol):
-    closes, highs, lows, opens, volumes = fetch_prices(symbol)
-    if not closes or len(closes) < 80:
-        return None
+    data = fetch_prices(symbol)
+    if not data: 
+        # Kembalikan error spesifik untuk ditampilkan di scan
+        err_count = fetch_errors.get(symbol, 0)
+        return {"signal": "ERROR", "reason": f"Fetch Gagal ({err_count}x). Cek Log Railway."}
 
+    closes, highs, lows, opens, volumes = data
     price = closes[-1]
     rsi = calc_rsi(closes)
     adx_val, _, _ = calc_adx(highs, lows, closes)
@@ -334,13 +304,10 @@ def analyze(symbol):
 
 # ==================== SESSION DETECTION ====================
 def get_session_name(hour_utc):
-    if OVERLAP_START_UTC <= hour_utc < OVERLAP_END_UTC:
-        return "🔥 Overlap London+NY"
-    if LONDON_OPEN_UTC <= hour_utc < LONDON_CLOSE_UTC:
-        return "✅ London Session"
-    if NY_OPEN_UTC <= hour_utc < NY_CLOSE_UTC:
-        return "✅ New York Session"
-    return "⚠️ Off-Hours (Market Sepi)"
+    if OVERLAP_START_UTC <= hour_utc < OVERLAP_END_UTC: return " Overlap London+NY"
+    if LONDON_OPEN_UTC <= hour_utc < LONDON_CLOSE_UTC: return "✅ London Session"
+    if NY_OPEN_UTC <= hour_utc < NY_CLOSE_UTC: return "✅ New York Session"
+    return "️ Off-Hours (Market Sepi)"
 
 def is_active_session(hour_utc):
     return (LONDON_OPEN_UTC <= hour_utc < LONDON_CLOSE_UTC) or \
@@ -350,9 +317,10 @@ def is_active_session(hour_utc):
 def run_backtest():
     total, wins, losses = 0, 0, 0
     for symbol in ASSETS:
-        closes, highs, lows, opens, volumes = fetch_prices(symbol, days=7)
-        if not closes or len(closes) < 200:
-            continue
+        data = fetch_prices(symbol, days=7)
+        if not data: continue
+        closes, highs, lows, opens, volumes = data
+        if len(closes) < 200: continue
         for i in range(100, len(closes) - EXPIRY_MINUTES):
             entry_price = closes[i]
             direction = "CALL" if closes[i] > opens[i] else "PUT"
@@ -361,19 +329,13 @@ def run_backtest():
             total += 1
             sl_buffer = entry_price * 0.0005
             if direction == "CALL":
-                if future_low < (entry_price - sl_buffer):
-                    losses += 1
-                elif future_high > entry_price:
-                    wins += 1
-                else:
-                    losses += 1
+                if future_low < (entry_price - sl_buffer): losses += 1
+                elif future_high > entry_price: wins += 1
+                else: losses += 1
             else:
-                if future_high > (entry_price + sl_buffer):
-                    losses += 1
-                elif future_low < entry_price:
-                    wins += 1
-                else:
-                    losses += 1
+                if future_high > (entry_price + sl_buffer): losses += 1
+                elif future_low < entry_price: wins += 1
+                else: losses += 1
     win_rate = (wins / total * 100) if total > 0 else 0
     avg_per_day = total / 7.0
     return {"total": total, "wins": wins, "losses": losses,
@@ -381,63 +343,48 @@ def run_backtest():
 
 # ==================== FORMAT NOTIFIKASI ====================
 def format_early_warning(name, symbol, result):
-    sig = result["signal"]
-    emoji = "🟢" if sig == "CALL" else "🔴"
-    score = result["score"]
-    p = result["price"]
+    sig = result["signal"]; emoji = "🟢" if sig == "CALL" else "🔴"
+    score = result["score"]; p = result["price"]
     session = get_session_name(datetime.datetime.utcnow().hour)
     entry_instruction = "🟢 PERSIAPAN BELI NAIK (CALL)" if sig == "CALL" else "🔴 PERSIAPAN BELI TURUN (PUT)"
     lines = [
         f"🔔 {emoji} <b>EARLY WARNING - {html_escape(name)}</b>",
         f"📊 <code>{html_escape(symbol)}</code> | TF: {TIMEFRAME_MINUTES}m | Expiry: {EXPIRY_MINUTES}m",
-        "━━━━━━━━━━━━━━━━━━━",
-        entry_instruction,
-        f"⏳ <b>Entry dalam {EARLY_WARNING_SECONDS // 60} menit - siapkan platform!</b>",
-        "━━━━━━━━━━━━━━━━━━━",
-        f"<b>Skor: {score}/8</b>",
-        f"🕐 {html_escape(session)}",
-        "━━━━━━━━━━━━━━━━━━━",
-        f"💰 Harga: <code>{p:.5f}</code>",
+        "━━━━━━━━━━━━━━━━━━━", entry_instruction,
+        f" <b>Entry dalam {EARLY_WARNING_SECONDS // 60} menit - siapkan platform!</b>",
+        "━━━━━━━━━━━━━━━━━━━", f"<b>Skor: {score}/8</b>", f" {html_escape(session)}",
+        "━━━━━━━━━━━━━━━━━━━", f"💰 Harga: <code>{p:.5f}</code>",
         f"🎯 TP: <code>{result.get('tp', 'N/A')}</code> | 🛑 SL: <code>{result.get('sl', 'N/A')}</code>",
-        "━━━━━━━━━━━━━━━━━━━",
-        "📋 <i>Checklist: Buka Stockity > Pilih Aset > Set Expiry 5m</i>",
+        "━━━━━━━━━━━━━━━━━━━", "📋 <i>Checklist: Buka Stockity > Pilih Aset > Set Expiry 5m</i>",
         "💰 <i>Stake: 1-2% saldo | Max loss/hari: 5%</i>",
     ]
     return "\n".join(lines)
 
 def format_signal_alert(name, symbol, result):
-    sig = result["signal"]
-    emoji = "🟢" if sig == "CALL" else "🔴"
-    score = result["score"]
-    p = result["price"]
+    sig = result["signal"]; emoji = "🟢" if sig == "CALL" else "🔴"
+    score = result["score"]; p = result["price"]
     strength = "🔥 SANGAT KUAT" if score >= 7 else ("💪 KUAT" if score >= 5.5 else "✅ STANDAR")
     entry_instruction = "🟢 LANGSUNG BELI NAIK (CALL)" if sig == "CALL" else "🔴 LANGSUNG BELI TURUN (PUT)"
     lines = [
         f"🚨 {emoji} <b>{sig} SIGNAL - {html_escape(name)}</b>",
         f"📊 <code>{html_escape(symbol)}</code> | TF: {TIMEFRAME_MINUTES}m | Expiry: {EXPIRY_MINUTES}m",
-        "━━━━━━━━━━━━━━━━━━━",
-        entry_instruction,
+        "━━━━━━━━━━━━━━━━━━━", entry_instruction,
         f"⚡ <b>ENTRY SEKARANG - JANGAN TUNDA!</b>",
         f"🎯 <b>Expiry: {EXPIRY_MINUTES} Menit (MAX PLATFORM)</b>",
-        "━━━━━━━━━━━━━━━━━━━",
-        f"<b>Skor: {score}/8</b> | {strength}",
+        "━━━━━━━━━━━━━━━━━━━", f"<b>Skor: {score}/8</b> | {strength}",
         f"💰 Entry: <code>{p:.5f}</code>",
         f"🎯 TP: <code>{result.get('tp', 'N/A')}</code> | 🛑 SL: <code>{result.get('sl', 'N/A')}</code>",
-        "━━━━━━━━━━━━━━━━━━━",
-        "✅ <i>Re-validasi lolos - kondisi masih valid</i>",
+        "━━━━━━━━━━━━━━━━━━━", "✅ <i>Re-validasi lolos - kondisi masih valid</i>",
         "ℹ️ <i>Filter: ADX≥20, Vol≥1.2x, Wick OK</i>",
-        "━━━━━━━━━━━━━━━━━━━",
-        "💰 <i>Stake: 1-2% saldo | Max loss/hari: 5%</i>",
+        "━━━━━━━━━━━━━━━━━━━", "💰 <i>Stake: 1-2% saldo | Max loss/hari: 5%</i>",
     ]
     return "\n".join(lines)
 
 def format_cancelled(name, symbol, reason):
     lines = [
         f"⚠️ <b>SINYAL DIBATALKAN - {html_escape(name)}</b>",
-        f"📊 <code>{html_escape(symbol)}</code>",
-        "━━━━━━━━━━━━━━━━━━━",
-        f"❌ Alasan: {html_escape(reason)}",
-        "━━━━━━━━━━━━━━━━━━━",
+        f"📊 <code>{html_escape(symbol)}</code>", "━━━━━━━━━━━━━━━━━━━",
+        f"❌ Alasan: {html_escape(reason)}", "━━━━━━━━━━━━━━━━━━━",
         "<i>Jangan entry - tunggu sinyal berikutnya</i>",
     ]
     return "\n".join(lines)
@@ -447,8 +394,8 @@ def setup_handlers(b):
     @b.message_handler(commands=["start"])
     def cmd_start(message):
         b.reply_to(message,
-            f"🤖 <b>Aswadd Bot Multi-Asset v3.5.3 (Optimized)</b>\n\n"
-            f"✅ <b>Fix:</b> Dynamic Cooldown, News Block, Low Vol Fallback\n"
+            f"🤖 <b>Aswadd Bot Multi-Asset v3.5.4 (Rescue Mode)</b>\n\n"
+            f"✅ <b>Fix:</b> Fetch Timeout, Error Tracking, Dynamic Cooldown\n"
             f"🔕 Mode Senyap Aktif | Min Score: {MIN_SCORE_BASE}/8\n"
             f"🎯 Target: EUR/USD, GBP/USD, USD/JPY (TF 5m)",
             parse_mode="HTML")
@@ -459,7 +406,7 @@ def setup_handlers(b):
         pending_count = len([s for s in pending_signals.values()
                             if (time.time() - s['warn_time']) < EARLY_WARNING_SECONDS])
         b.reply_to(message,
-            f"✅ <b>Bot Active v3.5.3</b>\n"
+            f"✅ <b>Bot Active v3.5.4</b>\n"
             f"Sesi: {get_session_name(utc_now.hour)}\n"
             f"Pending Re-check: {pending_count}\n"
             f"Last Update: {utc_now.strftime('%H:%M:%S')} UTC",
@@ -486,13 +433,19 @@ def setup_handlers(b):
                 result = analyze(symbol)
                 if result:
                     sig = result.get("signal", "WAIT")
+                    
+                    # Handle Fetch Error Khusus
+                    if sig == "ERROR":
+                        results.append(f"❌ <b>{html_escape(name)}</b>: {html_escape(result.get('reason', 'Unknown Error'))}")
+                        continue
+
                     score = result.get("score", 0)
                     raw = result.get("raw_score", 0)
                     reason = result.get("reasons", [""])[0] if result.get("reasons") else "No reason"
                     emoji_sig = "🟢" if sig == "CALL" else ("🔴" if sig == "PUT" else "⏳")
                     results.append(
                         f"{emoji_sig} <b>{html_escape(name)}</b>: {score}/8 (raw {raw}/7)\n"
-                        f"   <i>{html_escape(reason[:50])}</i>"
+                        f"   <i>{html_escape(reason[:60])}</i>"
                     )
                 else:
                     results.append(f"⚪ <b>{html_escape(name)}</b>: Data tidak tersedia")
@@ -556,25 +509,28 @@ def scan_loop():
                         continue
                     
                     result = analyze(symbol)
-                    if result and result["signal"] != "WAIT":
-                        score = result["score"]
-                        
-                        # Cek Cooldown Dinamis berdasarkan skor
-                        required_cooldown_min = get_cooldown_minutes(score)
-                        elapsed_min = (now - last_time) / 60
-                        
-                        if elapsed_min < required_cooldown_min:
-                            continue
+                    # Skip jika error fetch atau wait
+                    if not result or result["signal"] in ["WAIT", "ERROR"]: 
+                        continue
 
-                        # Send Early Warning
-                        warn_msg = format_early_warning(name, symbol, result)
-                        b.send_message(CHAT_ID, warn_msg, parse_mode="HTML")
-                        
-                        pending_signals[symbol] = {
-                            'result': result,
-                            'warn_time': now
-                        }
-                        last_signal_scores[symbol] = f"{score}/8"
+                    score = result["score"]
+                    
+                    # Cek Cooldown Dinamis berdasarkan skor
+                    required_cooldown_min = get_cooldown_minutes(score)
+                    elapsed_min = (now - last_time) / 60
+                    
+                    if elapsed_min < required_cooldown_min:
+                        continue
+
+                    # Send Early Warning
+                    warn_msg = format_early_warning(name, symbol, result)
+                    b.send_message(CHAT_ID, warn_msg, parse_mode="HTML")
+                    
+                    pending_signals[symbol] = {
+                        'result': result,
+                        'warn_time': now
+                    }
+                    last_signal_scores[symbol] = f"{score}/8"
 
             time.sleep(CHECK_INTERVAL)
 
@@ -585,7 +541,7 @@ def scan_loop():
 # ==================== DEPLOYMENT ENTRY POINT ====================
 @app.route('/')
 def home():
-    return "Aswadd Bot v3.5.3 Running"
+    return "Aswadd Bot v3.5.4 Running"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
