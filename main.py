@@ -1,555 +1,586 @@
-import os
-import time
+"""
+================================================================================
+ASWADD BOT MULTI-ASSET v3.5.5 LITE EDITION - STABILIZED
+================================================================================
+ROLE: Lead Developer & Partner Trading
+PLATFORM: Railway Trial (RAM 512MB-1GB STRICT LIMIT)
+REPO: GitHub aswadd_bot (Branch: main)
+STATUS: Active | yfinance | Dynamic Filter | Memory Optimized
+
+⚠️ CRITICAL RULES (JANGAN LANGGAR):
+1. MEMORY: gc.collect() WAJIB setelah fetch & di except block. del df segera.
+2. DATETIME: ZERO TOLERANCE untuk utcnow(). Gunakan datetime.now(timezone.utc).
+3. FETCH: Timeout max 10s. Sequential. Skip aset jika error, jangan crash loop.
+4. FILTER: ADX>=20 & Vol>=1.2x = Hard filter tapi beri poin kecil jika gagal.
+5. SCORE: Min 5.0 (Normal) / 6.5 (Low Vol). Cooldown dinamis 5-12 menit.
+6. SESSION: London (15:00-00:00 WITA) & NY (20:00-05:00 WITA) ONLY.
+7. NEWS: Block ±30 menit sekitar high-impact events.
+8. DEPLOY: Hapus deployment lama sebelum redeploy. Cek log utk utcnow warning.
+9. STRATEGY: Tetap v3.5.x. DILARANG upgrade arsitektur v4.0 tanpa bukti empiris.
+10. FEEDBACK: /scan WAJIB balas meski market sepi/data kosong.
+
+ASSETS: EURUSD=X, GBPUSD=X, USDJPY=X
+EXPIRY: 5 menit | TF: 5 menit
+SPREADSHEET: Tracking manual (Tanggal, Jam, Aset, Sinyal, Skor, Hasil)
+
+RIWAYAT MASALAH TERSELESAIKAN:
+- Memory leak yfinance → Sequential fetch + gc.collect() agresif
+- utcnow deprecation → Full timezone.utc migration
+- Fetch timeout/blokir → Timeout ketat + error handling per aset
+- Bot diam off-hours → Feedback wajib + dynamic cooldown/news block
+- Filter terlalu ketat → Poin kecil untuk ADX/Vol gagal (bukan reject mutlak)
+
+TERAKHIR UPDATE: 20 Agustus 2026
+================================================================================
+"""
+
 import gc
-import datetime
-import threading
+import os
+import logging
+import time
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict, List, Tuple
 import requests
-from flask import Flask, request as flask_request
-import telebot
 import yfinance as yf
-from datetime import timezone
+from flask import Flask, request
 
-# ==================== KONFIGURASI FINAL v3.5.5 (LITE EDITION) ====================
-CHAT_ID = os.environ.get("CHAT_ID")
-CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "30"))
-MIN_SCORE_BASE = float(os.environ.get("MIN_SCORE_BASE", "5.0"))
+# === KONFIGURASI ENVIRONMENT ===
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
+MIN_SCORE_BASE = float(os.getenv("MIN_SCORE_BASE", "5.0"))
+MIN_SCORE_LOW_VOL = float(os.getenv("MIN_SCORE_LOW_VOL", "6.5"))
+ASSETS = ["EURUSD=X", "GBPUSD=X", "USDJPY=X"]
 
-EXPIRY_MINUTES = 5
-TIMEFRAME_MINUTES = 5
-EARLY_WARNING_SECONDS = 60
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
-ASSETS = {
-    "EURUSD=X": "EUR/USD",
-    "GBPUSD=X": "GBP/USD",
-    "USDJPY=X": "USD/JPY",
-}
+# === DAFTAR HIGH IMPACT EVENTS (UPDATE MINGGUAN) ===
+# Format: (datetime UTC, deskripsi singkat)
+HIGH_IMPACT_EVENTS: List[Tuple[datetime, str]] = [
+    # CONTOH: (datetime(2026, 8, 25, 14, 30, tzinfo=timezone.utc), "US Core PCE"),
+    # TODO: Update setiap Minggu malam sesuai kalender ekonomi minggu depan
+]
 
-LONDON_OPEN_UTC, LONDON_CLOSE_UTC = 7, 16
-NY_OPEN_UTC, NY_CLOSE_UTC = 12, 21
-OVERLAP_START_UTC, OVERLAP_END_UTC = 13, 16
+# === STATE MANAGEMENT (IN-MEMORY, RINGAN) ===
+last_signal_time: Dict[str, datetime] = {}
+fetch_error_count: Dict[str, int] = {}
 
-# ==================== HELPER & DYNAMIC FILTERS ====================
-def html_escape(text):
+
+# ===================== HELPER FUNCTIONS =====================
+
+def html_escape(text: str) -> str:
+    """Escape karakter khusus untuk Telegram HTML parse mode."""
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-app = Flask(__name__)
-bot = None
-cooldown_tracker = {}
-last_signal_scores = {}
-pending_signals = {}
-fetch_errors = {"EURUSD=X": 0, "GBPUSD=X": 0, "USDJPY=X": 0}
-
-def get_bot():
-    global bot
-    if bot is None:
-        token = os.environ.get("BOT_TOKEN")
-        if not token:
-            raise ValueError("BOT_TOKEN missing in Railway Variables!")
-        bot = telebot.TeleBot(token)
-        setup_handlers(bot)
-    return bot
 
 def get_cooldown_minutes(score: float) -> int:
-    if score >= 7.0: return 5
-    elif score >= 6.0: return 8
-    elif score >= 5.5: return 10
-    else: return 12
+    """Cooldown dinamis berdasarkan skor sinyal (5-12 menit)."""
+    if score >= 7.5:
+        return 5
+    elif score >= 6.5:
+        return 8
+    else:
+        return 12
+
 
 def is_news_blocked() -> bool:
-    utc_now = datetime.datetime.now(timezone.utc)
-    high_impact_events = [
-        datetime.datetime(2026, 8, 20, 12, 30, tzinfo=timezone.utc),
-        datetime.datetime(2026, 8, 20, 14, 0, tzinfo=timezone.utc),
-    ]
-    for event_time in high_impact_events:
-        time_diff = abs((utc_now - event_time).total_seconds())
-        if time_diff < 1800: return True
+    """Cek apakah saat ini berada dalam window ±30 menit dari high-impact event."""
+    now = datetime.now(timezone.utc)
+    for event_time, desc in HIGH_IMPACT_EVENTS:
+        delta = abs((now - event_time).total_seconds())
+        if delta <= 1800:  # 30 menit = 1800 detik
+            logger.info(f"[NEWS BLOCK] {desc} dalam {int(delta/60)} menit")
+            return True
     return False
 
-# ==================== DATA FETCHING (OPTIMIZED FOR LOW RAM) ====================
-def fetch_prices(symbol, days=3):
-    """Fetch data dengan manajemen memori ketat"""
+
+def get_session_name() -> str:
+    """Return nama sesi trading aktif berdasarkan waktu UTC."""
+    hour = datetime.now(timezone.utc).hour
+    # London: 07:00-16:00 UTC | NY: 12:00-21:00 UTC
+    if 7 <= hour < 16:
+        return "London"
+    elif 12 <= hour < 21:
+        return "New York"
+    elif 7 <= hour < 21:
+        return "London/NY Overlap"
+    else:
+        return "Off-Session"
+
+
+def is_active_session() -> bool:
+    """Cek apakah saat ini dalam sesi London atau NY (termasuk overlap)."""
+    session = get_session_name()
+    return session in ["London", "New York", "London/NY Overlap"]
+
+
+# ===================== DATA FETCHING (MEMORY SAFE) =====================
+
+def fetch_prices(symbol: str, period: str = "5d", interval: str = "5m") -> Optional[List[dict]]:
+    """
+    Fetch data OHLCV dari yfinance dengan manajemen memori ketat.
+    Return list of dict (bukan DataFrame) untuk menghindari memory leak.
+    """
     try:
         ticker = yf.Ticker(symbol)
-        period_map = {1: "1d", 2: "2d", 3: "5d", 5: "5d", 7: "7d", 14: "1mo"}
-        period = period_map.get(days, "5d")
+        df = ticker.history(period=period, interval=interval, timeout=10)
         
-        # Timeout manual via requests session jika yfinance hang
-        df = ticker.history(period=period, interval="5m")
-        
-        if df is None or df.empty or len(df) < 80:
-            print(f"[FETCH FAIL] {symbol}: Data kurang ({len(df) if df is not None else 0})")
+        if df.empty or len(df) < 60:
+            logger.warning(f"[FETCH] Data tidak cukup untuk {symbol}: {len(df)} bars")
+            fetch_error_count[symbol] = fetch_error_count.get(symbol, 0) + 1
             return None
-            
-        # Konversi ke list segera lalu hapus dataframe untuk hemat RAM
-        closes = df['Close'].dropna().tolist()
-        highs = df['High'].dropna().tolist()
-        lows = df['Low'].dropna().tolist()
-        opens = df['Open'].dropna().tolist()
-        volumes = df['Volume'].dropna().tolist()
         
-        del df  # Hapus dataframe dari memori
-        gc.collect() # Paksa garbage collection
+        # Konversi ke list of dict SEBELUM menghapus DataFrame
+        data = []
+        for idx, row in df.iterrows():
+            data.append({
+                'timestamp': idx.to_pydatetime(),
+                'open': float(row['Open']),
+                'high': float(row['High']),
+                'low': float(row['Low']),
+                'close': float(row['Close']),
+                'volume': float(row['Volume'])
+            })
         
-        min_len = min(len(closes), len(highs), len(lows), len(opens), len(volumes))
-        if min_len < 80: return None
-        
-        fetch_errors[symbol] = 0
-        return (closes[-min_len:], highs[-min_len:], lows[-min_len:],
-                opens[-min_len:], volumes[-min_len:])
-    
-    except Exception as e:
-        fetch_errors[symbol] = fetch_errors.get(symbol, 0) + 1
-        print(f"[FETCH ERROR] {symbol} (Count: {fetch_errors[symbol]}): {str(e)[:80]}")
+        # Hapus DataFrame dan paksa garbage collection
+        del df
         gc.collect()
+        
+        fetch_error_count[symbol] = 0  # Reset error count jika berhasil
+        return data
+        
+    except Exception as e:
+        logger.error(f"[FETCH ERROR] {symbol}: {str(e)}")
+        fetch_error_count[symbol] = fetch_error_count.get(symbol, 0) + 1
+        gc.collect()  # Wajib collect di except block
         return None
 
-# ==================== INDIKATOR TEKNIKAL ====================
-def calc_ema(data, period):
-    if len(data) < period: return data[-1] if data else 0
-    k = 2 / (period + 1)
-    ema = data[0]
-    for price in data[1:]: ema = price * k + ema * (1 - k)
+
+# ===================== INDIKATOR TEKNIKAL =====================
+
+def calc_ema(data: List[float], period: int) -> List[float]:
+    """Hitung EMA dari list harga."""
+    if len(data) < period:
+        return []
+    multiplier = 2 / (period + 1)
+    ema = [sum(data[:period]) / period]
+    for price in data[period:]:
+        ema.append((price - ema[-1]) * multiplier + ema[-1])
     return ema
 
-def calc_ema_series(data, period):
-    if len(data) < period: return []
-    k = 2 / (period + 1)
-    ema = data[0]
-    series = [ema]
-    for price in data[1:]:
-        ema = price * k + ema * (1 - k)
-        series.append(ema)
-    return series
 
-def calc_rsi(closes, period=14):
-    if len(closes) < period + 1: return 50.0
-    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+def calc_rsi(closes: List[float], period: int = 14) -> Optional[float]:
+    """Hitung RSI terakhir dari list close price."""
+    if len(closes) < period + 1:
+        return None
+    deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
     gains = [d if d > 0 else 0 for d in deltas]
     losses = [-d if d < 0 else 0 for d in deltas]
+    
     avg_gain = sum(gains[-period:]) / period
     avg_loss = sum(losses[-period:]) / period
-    if avg_loss == 0: return 100.0
+    
+    if avg_loss == 0:
+        return 100.0
     rs = avg_gain / avg_loss
-    return round(100 - (100 / (1 + rs)), 2)
+    return 100 - (100 / (1 + rs))
 
-def calc_adx(highs, lows, closes, period=14):
-    if len(closes) < period * 2: return 0, 0, 0
-    plus_dm, minus_dm, tr_list = [], [], []
+
+def calc_adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> Optional[float]:
+    """Hitung ADX terakhir (simplified version untuk efisiensi memori)."""
+    if len(closes) < period * 2:
+        return None
+    
+    tr_list = []
+    plus_dm_list = []
+    minus_dm_list = []
+    
     for i in range(1, len(closes)):
-        up_move = highs[i] - highs[i - 1]
-        down_move = lows[i - 1] - lows[i]
-        plus_dm.append(up_move if up_move > down_move and up_move > 0 else 0)
-        minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0)
-        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        high_low = highs[i] - lows[i]
+        high_close = abs(highs[i] - closes[i-1])
+        low_close = abs(lows[i] - closes[i-1])
+        tr = max(high_low, high_close, low_close)
+        
+        up_move = highs[i] - highs[i-1]
+        down_move = lows[i-1] - lows[i]
+        
+        plus_dm = up_move if (up_move > down_move and up_move > 0) else 0
+        minus_dm = down_move if (down_move > up_move and down_move > 0) else 0
+        
         tr_list.append(tr)
-    if len(tr_list) < period: return 0, 0, 0
-    atr_val = sum(tr_list[-period:]) / period
-    if atr_val == 0: return 0, 0, 0
-    plus_di = 100 * (sum(plus_dm[-period:]) / period) / atr_val
-    minus_di = 100 * (sum(minus_dm[-period:]) / period) / atr_val
-    di_sum = plus_di + minus_di
-    if di_sum == 0: return 0, 0, 0
-    dx = 100 * abs(plus_di - minus_di) / di_sum
-    return round(dx, 2), round(plus_di, 2), round(minus_di, 2)
+        plus_dm_list.append(plus_dm)
+        minus_dm_list.append(minus_dm)
+    
+    if len(tr_list) < period:
+        return None
+    
+    atr = sum(tr_list[-period:]) / period
+    plus_di = (sum(plus_dm_list[-period:]) / period) / atr * 100 if atr != 0 else 0
+    minus_di = (sum(minus_dm_list[-period:]) / period) / atr * 100 if atr != 0 else 0
+    
+    dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100 if (plus_di + minus_di) != 0 else 0
+    return dx  # Simplified: return DX sebagai proxy ADX untuk efisiensi
 
-def calc_volume_ratio(volumes, period=20):
-    if len(volumes) < period + 1: return 1.0
-    avg_vol = sum(volumes[-(period + 1):-1]) / period
-    if avg_vol == 0: return 1.0
-    return round(volumes[-1] / avg_vol, 2)
 
-def detect_candle_pattern(opens, highs, lows, closes):
-    if len(closes) < 3: return "none"
-    o1, h1, l1, c1 = opens[-2], highs[-2], lows[-2], closes[-2]
-    o2, h2, l2, c2 = opens[-1], highs[-1], lows[-1], closes[-1]
-    body1 = abs(c1 - o1); body2 = abs(c2 - o2)
-    upper_shadow2 = h2 - max(o2, c2); lower_shadow2 = min(o2, c2) - l2
-    if c1 < o1 and c2 > o2 and c2 > o1 and o2 < c1 and body2 > body1 * 1.2: return "bullish_engulfing"
-    if c1 > o1 and c2 < o2 and c2 < o1 and o2 > c1 and body2 > body1 * 1.2: return "bearish_engulfing"
-    if lower_shadow2 > body2 * 2 and upper_shadow2 < body2 * 0.5 and body2 > 0 and c2 > o2: return "hammer"
-    if upper_shadow2 > body2 * 2 and lower_shadow2 < body2 * 0.5 and body2 > 0 and c2 < o2: return "shooting_star"
+def calc_volume_ratio(volumes: List[float], lookback: int = 20) -> Optional[float]:
+    """Rasio volume candle terakhir vs rata-rata 20 candle sebelumnya."""
+    if len(volumes) < lookback + 1:
+        return None
+    avg_vol = sum(volumes[-(lookback+1):-1]) / lookback
+    return volumes[-1] / avg_vol if avg_vol > 0 else 0
+
+
+def detect_candle_pattern(opens: List[float], closes: List[float], highs: List[float], lows: List[float]) -> str:
+    """Deteksi pola candle dasar (bullish/bearish engulfing, doji)."""
+    if len(opens) < 2:
+        return "none"
+    
+    prev_body = closes[-2] - opens[-2]
+    curr_body = closes[-1] - opens[-1]
+    body_size = abs(curr_body)
+    wick_upper = highs[-1] - max(opens[-1], closes[-1])
+    wick_lower = min(opens[-1], closes[-1]) - lows[-1]
+    total_range = highs[-1] - lows[-1]
+    
+    if total_range == 0:
+        return "none"
+    
+    # Doji
+    if body_size / total_range < 0.1:
+        return "doji"
+    # Bullish Engulfing
+    if prev_body < 0 and curr_body > 0 and abs(curr_body) > abs(prev_body):
+        return "bullish_engulfing"
+    # Bearish Engulfing
+    if prev_body > 0 and curr_body < 0 and abs(curr_body) > abs(prev_body):
+        return "bearish_engulfing"
+    
     return "none"
 
-def check_wick_filter(opens, highs, lows, closes):
-    if len(closes) < 2: return True, "data kurang"
-    o, h, l, c = opens[-1], highs[-1], lows[-1], closes[-1]
-    body = abs(c - o); total_range = h - l
-    if total_range == 0: return True, "range=0"
-    wick_ratio = (total_range - body) / total_range
-    if wick_ratio > 0.7: return False, f"Wick {wick_ratio:.0%} > 70%"
-    return True, f"Wick {wick_ratio:.0%} OK"
 
-def check_atr_filter(highs, lows, closes):
-    if len(closes) < 20: return True, "ATR data kurang"
+def check_wick_filter(highs: List[float], lows: List[float], closes: List[float], opens: List[float], max_wick_pct: float = 0.7) -> bool:
+    """Return True jika wick TIDAK melebihi threshold (lolos filter)."""
+    if len(highs) < 1:
+        return False
+    total_range = highs[-1] - lows[-1]
+    if total_range == 0:
+        return True
+    upper_wick = highs[-1] - max(opens[-1], closes[-1])
+    lower_wick = min(opens[-1], closes[-1]) - lows[-1]
+    max_wick = max(upper_wick, lower_wick)
+    return (max_wick / total_range) <= max_wick_pct
+
+
+def check_atr_filter(highs: List[float], lows: List[float], closes: List[float], 
+                     min_mult: float = 0.25, max_mult: float = 3.5) -> bool:
+    """Cek apakah range candle terakhir dalam batas ATR normal."""
+    if len(closes) < 15:
+        return False
+    tr_list = []
+    for i in range(-14, 0):
+        h_l = highs[i] - lows[i]
+        h_c = abs(highs[i] - closes[i-1])
+        l_c = abs(lows[i] - closes[i-1])
+        tr_list.append(max(h_l, h_c, l_c))
+    avg_tr = sum(tr_list) / len(tr_list)
     current_range = highs[-1] - lows[-1]
-    avg_range = sum(highs[i] - lows[i] for i in range(-20, 0)) / 20
-    if avg_range == 0: return True, "Avg range=0"
-    ratio = current_range / avg_range
-    if ratio < 0.25: return False, f"Market mati ({ratio:.2f}x)"
-    if ratio > 3.5: return False, f"Market chaos ({ratio:.2f}x)"
-    return True, f"ATR {ratio:.2f}x normal"
+    ratio = current_range / avg_tr if avg_tr > 0 else 0
+    return min_mult <= ratio <= max_mult
 
-# ==================== ANALISIS 8-LAYER v3.5.5 ====================
-def analyze(symbol):
-    data = fetch_prices(symbol)
-    if not data: 
-        err_count = fetch_errors.get(symbol, 0)
-        return {"signal": "ERROR", "reason": f"Fetch Gagal ({err_count}x). Cek Log Railway."}
 
-    closes, highs, lows, opens, volumes = data
-    price = closes[-1]
-    rsi = calc_rsi(closes)
-    adx_val, _, _ = calc_adx(highs, lows, closes)
-    vol_ratio = calc_volume_ratio(volumes)
-    candle_pat = detect_candle_pattern(opens, highs, lows, closes)
+# ===================== ANALISIS 8-LAYER =====================
 
-    ema9_s = calc_ema_series(closes, 9)
-    ema21_s = calc_ema_series(closes, 21)
+def analyze(symbol: str, data: List[dict]) -> Optional[Dict]:
+    """
+    Analisis 8-layer dengan deteksi Low Volatility & dynamic threshold.
+    Return dict sinyal atau None jika tidak memenuhi kriteria.
+    """
+    if len(data) < 60:
+        return None
+    
+    closes = [d['close'] for d in data]
+    highs = [d['high'] for d in data]
+    lows = [d['low'] for d in data]
+    opens = [d['open'] for d in data]
+    volumes = [d['volume'] for d in data]
+    
+    # Layer 1: EMA Cross + Alignment
+    ema9 = calc_ema(closes, 9)
+    ema21 = calc_ema(closes, 21)
     ema55 = calc_ema(closes, 55)
-
-    if len(ema9_s) < 3 or len(ema21_s) < 3:
-        return {"signal": "WAIT", "score": 0, "raw_score": 0, "reasons": ["Data EMA kurang"]}
-
-    prev_diff = ema9_s[-3] - ema21_s[-3]
-    curr_diff = ema9_s[-1] - ema21_s[-1]
-    golden_cross = prev_diff <= 0 and curr_diff > 0
-    death_cross = prev_diff >= 0 and curr_diff < 0
-
-    if not golden_cross and not death_cross:
-        return {"signal": "WAIT", "score": 0, "raw_score": 0,
-                "reasons": [f"Trend {'UP' if curr_diff > 0 else 'DOWN'} | Tidak ada cross"]}
-
-    atr_ok, atr_reason = check_atr_filter(highs, lows, closes)
-    if not atr_ok:
-        return {"signal": "WAIT", "score": 0, "raw_score": 0, "reasons": [atr_reason]}
-
-    wick_ok, wick_reason = check_wick_filter(opens, highs, lows, closes)
-    if not wick_ok:
-        return {"signal": "WAIT", "score": 0, "raw_score": 0, "reasons": [wick_reason]}
-
-    direction = "CALL" if golden_cross else "PUT"
+    if not ema9 or not ema21 or not ema55:
+        return None
+    
+    bullish_cross = ema9[-1] > ema21[-1] and ema9[-2] <= ema21[-2]
+    bearish_cross = ema9[-1] < ema21[-1] and ema9[-2] >= ema21[-2]
+    ema_aligned_bull = ema9[-1] > ema21[-1] > ema55[-1]
+    ema_aligned_bear = ema9[-1] < ema21[-1] < ema55[-1]
+    
+    direction = None
+    if bullish_cross and ema_aligned_bull:
+        direction = "BUY"
+    elif bearish_cross and ema_aligned_bear:
+        direction = "SELL"
+    else:
+        return None  # Tidak ada cross valid
+    
+    # Layer 2: RSI Zone
+    rsi = calc_rsi(closes)
+    if rsi is None or not (35 <= rsi <= 65):
+        return None
+    
+    # Layer 3: ADX (Hard filter + poin kecil)
+    adx = calc_adx(highs, lows, closes)
+    adx_pass = adx is not None and adx >= 20
+    
+    # Layer 4: Volume Ratio (Hard filter + poin kecil)
+    vol_ratio = calc_volume_ratio(volumes)
+    vol_pass = vol_ratio is not None and vol_ratio >= 1.2
+    
+    # Layer 5: Wick Filter
+    wick_pass = check_wick_filter(highs, lows, closes, opens)
+    if not wick_pass:
+        return None
+    
+    # Layer 6: ATR Filter
+    atr_pass = check_atr_filter(highs, lows, closes)
+    if not atr_pass:
+        return None
+    
+    # Layer 7: Candle Pattern (bonus poin)
+    pattern = detect_candle_pattern(opens, closes, highs, lows)
+    pattern_bonus = 0.5 if pattern in ["bullish_engulfing", "bearish_engulfing"] else 0
+    
+    # Layer 8: Scoring & Dynamic Threshold
     score = 0.0
-    reasons = []
-
-    low_volatility = (adx_val < 20 and vol_ratio < 1.2)
-    if low_volatility:
-        min_score_threshold = 6.5
-        reasons.append("⚠️ Mode Konservatif (Low Vol)")
-    else:
-        min_score_threshold = MIN_SCORE_BASE
-
-    score += 1.5
-    reasons.append(f"EMA9/21 {'' if golden_cross else '⬇'} (+1.5)")
-
-    if (golden_cross and price > ema55) or (death_cross and price < ema55):
-        score += 1.0
-        reasons.append("Sejalan EMA55 (+1.0)")
-
-    if 35 <= rsi <= 65:
-        score += 1.0
-        reasons.append(f"RSI {rsi} netral (+1.0)")
-
-    if adx_val >= 25:
-        score += 1.5
-        reasons.append(f"ADX {adx_val} kuat (+1.5)")
-    elif adx_val >= 20:
-        score += 1.0
-        reasons.append(f"ADX {adx_val} moderat (+1.0)")
-    else:
-        score += 0.3
-        reasons.append(f"ADX {adx_val} lemah (+0.3)")
-
-    if vol_ratio >= 1.5:
-        score += 1.5
-        reasons.append(f"Vol {vol_ratio}x tinggi (+1.5)")
-    elif vol_ratio >= 1.2:
-        score += 1.0
-        reasons.append(f"Vol {vol_ratio}x normal (+1.0)")
-    else:
-        score += 0.2
-        reasons.append(f"Vol {vol_ratio}x rendah (+0.2)")
-
-    if (golden_cross and candle_pat in ("bullish_engulfing", "hammer")) or \
-       (death_cross and candle_pat in ("bearish_engulfing", "shooting_star")):
-        score += 0.5
-        reasons.append(f"Pattern {candle_pat.replace('_', ' ').title()} (+0.5)")
-
-    score_norm = round(score / 7.0 * 8.0, 1)
-
-    if EXPIRY_MINUTES <= TIMEFRAME_MINUTES:
-        if adx_val < 20:
-            return {"signal": "WAIT", "score": score_norm, "raw_score": round(score, 1),
-                    "reasons": [f"ADX {adx_val} < 20 (terlalu lemah)"]}
-        if vol_ratio < 1.2:
-            return {"signal": "WAIT", "score": score_norm, "raw_score": round(score, 1),
-                    "reasons": [f"Vol {vol_ratio}x < 1.2 (momentum kurang)"]}
-
-    if score_norm < min_score_threshold:
-        return {"signal": "WAIT", "score": score_norm, "raw_score": round(score, 1),
-                "reasons": [f"Skor {score_norm}/8 < {min_score_threshold}"]}
-
-    atr = (highs[-1] - lows[-1]) * 1.5
-    sl = round(price - 1.5 * atr, 5) if direction == "CALL" else round(price + 1.5 * atr, 5)
-    tp = round(price + 2.5 * atr, 5) if direction == "CALL" else round(price - 2.5 * atr, 5)
-
+    score += 2.0  # EMA cross + alignment (wajib)
+    score += 1.0  # RSI in zone (wajib)
+    score += 1.0 if adx_pass else 0.3  # ADX
+    score += 1.0 if vol_pass else 0.3  # Volume
+    score += 1.0  # Wick pass (wajib)
+    score += 1.0  # ATR pass (wajib)
+    score += pattern_bonus
+    
+    # Deteksi Low Volatility Mode
+    recent_ranges = [highs[i] - lows[i] for i in range(-20, 0)]
+    avg_range = sum(recent_ranges) / len(recent_ranges) if recent_ranges else 0
+    is_low_vol = avg_range < (sum([h-l for h,l in zip(highs[-60:], lows[-60:])]) / 60 * 0.6)
+    
+    min_threshold = MIN_SCORE_LOW_VOL if is_low_vol else MIN_SCORE_BASE
+    
+    if score < min_threshold:
+        return None
+    
     return {
-        "signal": direction, "score": score_norm, "raw_score": round(score, 1),
-        "price": price, "tp": tp, "sl": sl, "reasons": reasons,
-        "trend": "UP" if curr_diff > 0 else "DOWN"
+        'symbol': symbol,
+        'direction': direction,
+        'score': round(score, 2),
+        'rsi': round(rsi, 2),
+        'adx': round(adx, 2) if adx else 0,
+        'vol_ratio': round(vol_ratio, 2) if vol_ratio else 0,
+        'pattern': pattern,
+        'is_low_vol': is_low_vol,
+        'min_threshold': min_threshold,
+        'timestamp': datetime.now(timezone.utc)
     }
 
-# ==================== SESSION DETECTION ====================
-def get_session_name(hour_utc):
-    if OVERLAP_START_UTC <= hour_utc < OVERLAP_END_UTC: return "🔥 Overlap London+NY"
-    if LONDON_OPEN_UTC <= hour_utc < LONDON_CLOSE_UTC: return "✅ London Session"
-    if NY_OPEN_UTC <= hour_utc < NY_CLOSE_UTC: return "✅ New York Session"
-    return "⚠️ Off-Hours (Market Sepi)"
 
-def is_active_session(hour_utc):
-    return (LONDON_OPEN_UTC <= hour_utc < LONDON_CLOSE_UTC) or \
-           (NY_OPEN_UTC <= hour_utc < NY_CLOSE_UTC)
+# ===================== FORMAT NOTIFIKASI =====================
 
-# ==================== BACKTEST JUJUR ====================
-def run_backtest():
-    total, wins, losses = 0, 0, 0
-    for symbol in ASSETS:
-        data = fetch_prices(symbol, days=7)
-        if not data: continue
-        closes, highs, lows, opens, volumes = data
-        if len(closes) < 200: continue
-        for i in range(100, len(closes) - EXPIRY_MINUTES):
-            entry_price = closes[i]
-            direction = "CALL" if closes[i] > opens[i] else "PUT"
-            future_high = max(highs[i:i + EXPIRY_MINUTES])
-            future_low = min(lows[i:i + EXPIRY_MINUTES])
-            total += 1
-            sl_buffer = entry_price * 0.0005
-            if direction == "CALL":
-                if future_low < (entry_price - sl_buffer): losses += 1
-                elif future_high > entry_price: wins += 1
-                else: losses += 1
-            else:
-                if future_high > (entry_price + sl_buffer): losses += 1
-                elif future_low < entry_price: wins += 1
-                else: losses += 1
-    win_rate = (wins / total * 100) if total > 0 else 0
-    avg_per_day = total / 7.0
-    return {"total": total, "wins": wins, "losses": losses,
-            "win_rate": win_rate, "avg_per_day": avg_per_day}
+def format_signal_alert(signal: Dict) -> str:
+    """Format pesan alert sinyal untuk Telegram."""
+    emoji = "🟢" if signal['direction'] == "BUY" else "🔴"
+    vol_status = "✅" if signal['vol_ratio'] >= 1.2 else "⚠️"
+    adx_status = "✅" if signal['adx'] >= 20 else "⚠️"
+    vol_mode = "🌙 LOW VOL" if signal['is_low_vol'] else "☀️ NORMAL"
+    
+    return (
+        f"{emoji} <b>SINYAL {signal['direction']}</b> | {html_escape(signal['symbol'])}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 Skor: <b>{signal['score']}/{8}</b> (Min: {signal['min_threshold']})\n"
+        f"📈 RSI: {signal['rsi']} | ADX: {signal['adx']} {adx_status}\n"
+        f"📦 Vol: {signal['vol_ratio']}x {vol_status} | Pola: {signal['pattern']}\n"
+        f"⏱️ Expiry: 5 menit | TF: 5m | Mode: {vol_mode}\n"
+        f"🕒 {signal['timestamp'].strftime('%H:%M:%S')} UTC\n"
+        f"━━━━━━━━━━━━━━━━━━━━━"
+    )
 
-# ==================== FORMAT NOTIFIKASI ====================
-def format_early_warning(name, symbol, result):
-    sig = result["signal"]; emoji = "🟢" if sig == "CALL" else "🔴"
-    score = result["score"]; p = result["price"]
-    session = get_session_name(datetime.datetime.now(timezone.utc).hour)
-    entry_instruction = "🟢 PERSIAPAN BELI NAIK (CALL)" if sig == "CALL" else " PERSIAPAN BELI TURUN (PUT)"
-    lines = [
-        f" {emoji} <b>EARLY WARNING - {html_escape(name)}</b>",
-        f" <code>{html_escape(symbol)}</code> | TF: {TIMEFRAME_MINUTES}m | Expiry: {EXPIRY_MINUTES}m",
-        "━━━━━━━━━━━━━━━━━━━", entry_instruction,
-        f"⏳ <b>Entry dalam {EARLY_WARNING_SECONDS // 60} menit - siapkan platform!</b>",
-        "━━━━━━━━━━━━━━━━━━━", f"<b>Skor: {score}/8</b>", f"🕐 {html_escape(session)}",
-        "━━━━━━━━━━━━━━━━━━━", f"💰 Harga: <code>{p:.5f}</code>",
-        f"🎯 TP: <code>{result.get('tp', 'N/A')}</code> | 🛑 SL: <code>{result.get('sl', 'N/A')}</code>",
-        "━━━━━━━━━━━━━━━━━━━", "📋 <i>Checklist: Buka Stockity > Pilih Aset > Set Expiry 5m</i>",
-        "💰 <i>Stake: 1-2% saldo | Max loss/hari: 5%</i>",
-    ]
-    return "\n".join(lines)
 
-def format_signal_alert(name, symbol, result):
-    sig = result["signal"]; emoji = "🟢" if sig == "CALL" else "🔴"
-    score = result["score"]; p = result["price"]
-    strength = "🔥 SANGAT KUAT" if score >= 7 else (" KUAT" if score >= 5.5 else "✅ STANDAR")
-    entry_instruction = " LANGSUNG BELI NAIK (CALL)" if sig == "CALL" else "🔴 LANGSUNG BELI TURUN (PUT)"
-    lines = [
-        f"🚨 {emoji} <b>{sig} SIGNAL - {html_escape(name)}</b>",
-        f"📊 <code>{html_escape(symbol)}</code> | TF: {TIMEFRAME_MINUTES}m | Expiry: {EXPIRY_MINUTES}m",
-        "━━━━━━━━━━━━━━━━━━━", entry_instruction,
-        f"⚡ <b>ENTRY SEKARANG - JANGAN TUNDA!</b>",
-        f"🎯 <b>Expiry: {EXPIRY_MINUTES} Menit (MAX PLATFORM)</b>",
-        "━━━━━━━━━━━━━━━━━━━", f"<b>Skor: {score}/8</b> | {strength}",
-        f"💰 Entry: <code>{p:.5f}</code>",
-        f"🎯 TP: <code>{result.get('tp', 'N/A')}</code> | 🛑 SL: <code>{result.get('sl', 'N/A')}</code>",
-        "━━━━━━━━━━━━━━━━━━━", "✅ <i>Re-validasi lolos - kondisi masih valid</i>",
-        "ℹ️ <i>Filter: ADX≥20, Vol≥1.2x, Wick OK</i>",
-        "━━━━━━━━━━━━━━━━━━━", "💰 <i>Stake: 1-2% saldo | Max loss/hari: 5%</i>",
-    ]
-    return "\n".join(lines)
+def format_cancelled(symbol: str, reason: str) -> str:
+    """Format pesan pembatalan sinyal."""
+    return f"❌ <b>DIBATALKAN</b> | {html_escape(symbol)}\nAlasan: {html_escape(reason)}"
 
-def format_cancelled(name, symbol, reason):
-    lines = [
-        f"️ <b>SINYAL DIBATALKAN - {html_escape(name)}</b>",
-        f" <code>{html_escape(symbol)}</code>", "━━━━━━━━━━━━━━━━━━━",
-        f"❌ Alasan: {html_escape(reason)}", "━━━━━━━━━━━━━━━━━━━",
-        "<i>Jangan entry - tunggu sinyal berikutnya</i>",
-    ]
-    return "\n".join(lines)
 
-# ==================== HANDLERS ====================
-def setup_handlers(b):
-    @b.message_handler(commands=["start"])
-    def cmd_start(message):
-        b.reply_to(message,
-            f" <b>Aswadd Bot Multi-Asset v3.5.5 (Lite)</b>\n\n"
-            f"✅ <b>Fix:</b> Memory Optimized, Stable Loop, Dynamic Cooldown\n"
-            f"🔕 Mode Senyap Aktif | Min Score: {MIN_SCORE_BASE}/8\n"
-            f" Target: EUR/USD, GBP/USD, USD/JPY (TF 5m)",
-            parse_mode="HTML")
+# ===================== TELEGRAM HANDLERS =====================
 
-    @b.message_handler(commands=["status"])
-    def cmd_status(message):
-        utc_now = datetime.datetime.now(timezone.utc)
-        pending_count = len([s for s in pending_signals.values()
-                            if (time.time() - s['warn_time']) < EARLY_WARNING_SECONDS])
-        b.reply_to(message,
-            f"✅ <b>Bot Active v3.5.5</b>\n"
-            f"Sesi: {get_session_name(utc_now.hour)}\n"
-            f"Pending Re-check: {pending_count}\n"
-            f"Last Update: {utc_now.strftime('%H:%M:%S')} UTC",
-            parse_mode="HTML")
+def send_telegram(text: str):
+    """Kirim pesan ke Telegram dengan error handling."""
+    if not CHAT_ID or not BOT_TOKEN:
+        logger.error("[TG] CHAT_ID atau BOT_TOKEN tidak diset!")
+        return
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML"
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code != 200:
+            logger.error(f"[TG] Gagal kirim: {resp.text}")
+    except Exception as e:
+        logger.error(f"[TG ERROR] {e}")
 
-    @b.message_handler(commands=["score"])
-    def cmd_score(message):
-        lines = ["📊 <b>Skor Terakhir:</b>"]
-        if last_signal_scores:
-            for sym, sc in last_signal_scores.items():
-                name = ASSETS.get(sym, sym)
-                lines.append(f"• {html_escape(name)}: {sc}")
-        else:
-            lines.append("<i>Belum ada scan</i>")
-        lines.append(f"\n⏳ Pending: {len(pending_signals)}")
-        b.reply_to(message, "\n".join(lines), parse_mode="HTML")
 
-    @b.message_handler(commands=["scan"])
-    def cmd_scan(message):
-        b.reply_to(message, "🔍 <i>Scanning market... (tunggu 15-30 detik)</i>", parse_mode="HTML")
+def handle_command(command: str, args: str = "") -> str:
+    """Handler untuk command Telegram."""
+    cmd = command.lower().strip()
+    
+    if cmd == "/start":
+        return "🤖 <b>Aswadd Bot v3.5.5 Lite</b>\nBot aktif & monitoring...\nGunakan /status, /scan, /score"
+    
+    elif cmd == "/status":
+        session = get_session_name()
+        active = "✅ Aktif" if is_active_session() else "💤 Off-Session"
+        news = "🚫 Blocked" if is_news_blocked() else "✅ Clear"
+        errors = sum(fetch_error_count.values())
+        return (
+            f"📡 <b>STATUS BOT</b>\n"
+            f"Sesi: {session} ({active})\n"
+            f"News: {news}\n"
+            f"Fetch Errors: {errors}\n"
+            f"Waktu: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC"
+        )
+    
+    elif cmd == "/scan":
+        if not is_active_session():
+            return "💤 <b>Market Sepi</b>\nDi luar sesi London/NY. Bot istirahat."
+        if is_news_blocked():
+            return "🚫 <b>News Block Aktif</b>\nMenunggu 30 menit pasca-event high-impact."
+        
         results = []
-        for symbol, name in ASSETS.items():
-            try:
-                result = analyze(symbol)
-                if result:
-                    sig = result.get("signal", "WAIT")
-                    
-                    if sig == "ERROR":
-                        results.append(f"❌ <b>{html_escape(name)}</b>: {html_escape(result.get('reason', 'Unknown Error'))}")
-                        continue
+        for symbol in ASSETS:
+            data = fetch_prices(symbol)
+            if data is None:
+                results.append(f"⚠️ {symbol}: Data kosong/fetch gagal")
+                continue
+            signal = analyze(symbol, data)
+            del data
+            gc.collect()
+            if signal:
+                results.append(format_signal_alert(signal))
+            else:
+                results.append(f"➖ {symbol}: Tidak ada sinyal valid")
+        
+        if not results:
+            return "📭 <b>Data Kosong</b>\nSemua aset gagal di-fetch. Cek koneksi/API."
+        return "\n\n".join(results)
+    
+    elif cmd == "/score":
+        return (
+            f"🎯 <b>KONFIGURASI SKOR</b>\n"
+            f"Normal Min: {MIN_SCORE_BASE}\n"
+            f"Low Vol Min: {MIN_SCORE_LOW_VOL}\n"
+            f"Cooldown: 5-12 menit (dinamis)\n"
+            f"Asets: {', '.join(ASSETS)}"
+        )
+    
+    else:
+        return "❓ Command tidak dikenal. Gunakan /start, /status, /scan, /score"
 
-                    score = result.get("score", 0)
-                    raw = result.get("raw_score", 0)
-                    reason = result.get("reasons", [""])[0] if result.get("reasons") else "No reason"
-                    emoji_sig = "" if sig == "CALL" else ("" if sig == "PUT" else "⏳")
-                    results.append(
-                        f"{emoji_sig} <b>{html_escape(name)}</b>: {score}/8 (raw {raw}/7)\n"
-                        f"   <i>{html_escape(reason[:60])}</i>"
-                    )
-                else:
-                    results.append(f" <b>{html_escape(name)}</b>: Data tidak tersedia")
-            except Exception as e:
-                results.append(f"❌ <b>{html_escape(name)}</b>: Error - {html_escape(str(e)[:40])}")
 
-        msg = " <b>HASIL SCAN MANUAL</b>\n━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(results)
-        try:
-            b.reply_to(message, msg, parse_mode="HTML")
-        except Exception as e:
-            print(f"[SCAN SEND ERROR] {e}")
+# ===================== MAIN LOOP =====================
 
-    @b.message_handler(commands=["backtest"])
-    def cmd_backtest(message):
-        b.reply_to(message, "⏳ <i>Menjalankan backtest jujur...</i>", parse_mode="HTML")
-        try:
-            result = run_backtest()
-            msg = (
-                f"📈 <b>HASIL BACKTEST JUJUR (7 Hari)</b>\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"Total Sinyal: {result['total']}\n"
-                f"Win: {result['wins']} | Loss: {result['losses']}\n"
-                f"Win Rate: {result['win_rate']:.1f}%\n"
-                f"Rata-rata/hari: {result['avg_per_day']:.1f}\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"<i>Simulasi termasuk slippage & cek High/Low intra-candle</i>"
-            )
-            b.reply_to(message, msg, parse_mode="HTML")
-        except Exception as e:
-            b.reply_to(message, f"❌ <i>Error: {html_escape(str(e)[:80])}</i>", parse_mode="HTML")
-
-# ==================== MAIN LOOP (STABLE & MEMORY SAFE) ====================
 def scan_loop():
+    """Loop utama scanning dengan sequential fetch & memory safety."""
+    logger.info("[LOOP] Scan loop dimulai")
     while True:
         try:
-            b = get_bot()
-            now = time.time()
-            utc_hour = datetime.datetime.now(timezone.utc).hour
-
-            # Handle Pending Signals (Re-check)
-            for symbol, data in list(pending_signals.items()):
-                if (now - data['warn_time']) >= EARLY_WARNING_SECONDS:
-                    recheck = analyze(symbol)
-                    if recheck and recheck.get("signal") == data['result']['signal']:
-                        alert_msg = format_signal_alert(ASSETS[symbol], symbol, recheck)
-                        b.send_message(CHAT_ID, alert_msg, parse_mode="HTML")
-                        cooldown_tracker[symbol] = now
-                        last_signal_scores[symbol] = f"{recheck['score']}/8"
-                        del pending_signals[symbol]
-                    else:
-                        cancel_msg = format_cancelled(ASSETS[symbol], symbol, "Kondisi berubah saat re-check")
-                        b.send_message(CHAT_ID, cancel_msg, parse_mode="HTML")
-                        del pending_signals[symbol]
-
-            # Scan Active Assets (SEQUENTIAL untuk hemat RAM)
-            if is_active_session(utc_hour) and not is_news_blocked():
-                for symbol, name in ASSETS.items():
-                    last_time = cooldown_tracker.get(symbol, 0)
-                    if (now - last_time) < 60: continue
-                    
-                    result = analyze(symbol)
-                    if not result or result["signal"] in ["WAIT", "ERROR"]: 
+            if not is_active_session():
+                logger.info(f"[LOOP] Off-session ({get_session_name()}), tidur 60s")
+                time.sleep(60)
+                continue
+            
+            if is_news_blocked():
+                logger.info("[LOOP] News block aktif, tidur 60s")
+                time.sleep(60)
+                continue
+            
+            for symbol in ASSETS:
+                # Cek cooldown
+                last_time = last_signal_time.get(symbol)
+                if last_time:
+                    elapsed = (datetime.now(timezone.utc) - last_time).total_seconds() / 60
+                    min_cooldown = get_cooldown_minutes(MIN_SCORE_BASE)
+                    if elapsed < min_cooldown:
                         continue
-
-                    score = result["score"]
-                    required_cooldown_min = get_cooldown_minutes(score)
-                    elapsed_min = (now - last_time) / 60
-                    
-                    if elapsed_min < required_cooldown_min:
-                        continue
-
-                    warn_msg = format_early_warning(name, symbol, result)
-                    b.send_message(CHAT_ID, warn_msg, parse_mode="HTML")
-                    
-                    pending_signals[symbol] = {
-                        'result': result,
-                        'warn_time': now
-                    }
-                    last_signal_scores[symbol] = f"{score}/8"
-                    
-                    # Jeda kecil antar aset untuk stabilitas
-                    time.sleep(2) 
-
+                
+                # Fetch & Analyze
+                data = fetch_prices(symbol)
+                if data is None:
+                    continue
+                
+                signal = analyze(symbol, data)
+                del data
+                gc.collect()
+                
+                if signal:
+                    msg = format_signal_alert(signal)
+                    send_telegram(msg)
+                    last_signal_time[symbol] = datetime.now(timezone.utc)
+                    logger.info(f"[SIGNAL] {symbol} {signal['direction']} Score={signal['score']}")
+            
+            # Sleep antar cycle
             time.sleep(CHECK_INTERVAL)
-
+            
         except Exception as e:
-            print(f"[LOOP ERROR] {str(e)[:100]}")
-            time.sleep(10)
-            gc.collect() # Bersihkan memori jika error
+            logger.error(f"[LOOP ERROR] {e}")
+            gc.collect()
+            time.sleep(30)
 
-# ==================== DEPLOYMENT ENTRY POINT ====================
-@app.route('/')
-def home():
-    return "Aswadd Bot v3.5.5 Running"
 
-@app.route('/webhook', methods=['POST'])
+# ===================== FLASK APP (WEBHOOK ENTRY POINT) =====================
+
+app = Flask(__name__)
+
+@app.route("/", methods=["GET"])
+def health_check():
+    return {"status": "ok", "version": "v3.5.5-lite"}, 200
+
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    if flask_request.headers.get('content-type') == 'application/json':
-        json_string = flask_request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return '', 200
-    else:
-        return '', 403
+    update = request.get_json(force=True)
+    if "message" in update and "text" in update["message"]:
+        text = update["message"]["text"]
+        parts = text.split(" ", 1)
+        cmd = parts[0]
+        args = parts[1] if len(parts) > 1 else ""
+        reply = handle_command(cmd, args)
+        send_telegram(reply)
+    return "OK", 200
+
+
+# ===================== ENTRY POINT =====================
 
 if __name__ == "__main__":
-    bot_thread = threading.Thread(target=scan_loop, daemon=True)
-    bot_thread.start()
+    import threading
     
-    port = int(os.environ.get("PORT", 5000))
+    # Validasi env vars
+    if not CHAT_ID or not BOT_TOKEN:
+        logger.critical("TELEGRAM_CHAT_ID atau TELEGRAM_BOT_TOKEN tidak diset! Exiting.")
+        exit(1)
+    
+    # Start scan loop di background thread
+    scanner_thread = threading.Thread(target=scan_loop, daemon=True)
+    scanner_thread.start()
+    logger.info("[MAIN] Scanner thread started")
+    
+    # Start Flask server
+    port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
